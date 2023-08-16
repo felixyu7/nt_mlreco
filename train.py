@@ -2,10 +2,9 @@ import torch
 import numpy as np
 import lightning.pytorch as pl
 import wandb
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import WandbLogger, CSVLogger
 from lightning.pytorch.callbacks import LearningRateMonitor
 
-from dataloaders.prometheus import PrometheusDataModule
 from networks.sscnn import SSCNN
 
 import yaml
@@ -30,8 +29,16 @@ if __name__=="__main__":
         cfg = yaml.load(cfg_file, Loader=yaml.FullLoader)
 
     # initialize dataloaders
-    # train_dataloader, valid_dataloader = create_train_dataloaders(cfg)
-    dm = PrometheusDataModule(cfg)
+    if cfg['dataloader'] == 'prometheus':
+        from dataloaders.prometheus import PrometheusDataModule
+        dm = PrometheusDataModule(cfg)
+    elif cfg['dataloader'] == 'icecube':
+        from dataloaders.icecube import IceCubeDataModule
+        dm = IceCubeDataModule(cfg)
+    else:
+        print("Unknown dataloader!")
+        exit()
+
     net = SSCNN(1, reps=cfg['model_options']['reps'], 
                         depth=cfg['model_options']['depth'], 
                         first_num_filters=cfg['model_options']['num_filters'], 
@@ -51,17 +58,18 @@ if __name__=="__main__":
 
     if cfg['training']:
         # initialise the wandb logger and name your wandb project
-        wandb_logger = WandbLogger(project='nt_mlreco')
+        wandb_logger = WandbLogger(project='nt_mlreco', log_model='all')
 
         # add your batch size to the wandb config
         wandb_logger.experiment.config["batch_size"] = cfg['training_options']['batch_size']
 
         lr_monitor = LearningRateMonitor(logging_interval='step')
-        trainer = pl.Trainer(accelerator='gpu', max_epochs=5, log_every_n_steps=10, default_root_dir='./logs', 
+        trainer = pl.Trainer(accelerator='gpu', strategy='ddp', devices=2, num_nodes=1, max_epochs=5, log_every_n_steps=10, 
                             logger=wandb_logger, callbacks=[lr_monitor])
         trainer.fit(model=net, datamodule=dm)
     else:
-        trainer = pl.Trainer(accelerator='gpu', profiler='simple')
-        val_outs = trainer.validate(model=net, datamodule=dm)
+        logger = CSVLogger('.', name="nt_mlreco_testing", version="ic_angular_reco_testing")
+        trainer = pl.Trainer(accelerator='gpu', profiler='simple', logger=logger)
+        test_outs = trainer.test(model=net, datamodule=dm)
         import pdb; pdb.set_trace()
 

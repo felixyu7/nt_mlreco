@@ -17,6 +17,10 @@ class SSCNN(pl.LightningModule):
         self.validation_step_outputs = []
         self.validation_step_labels = []
 
+        self.test_step_outputs = []
+        self.test_step_labels = []
+        self.test_results = {}
+
         if self.hparams.mode == 'both':
             out_features = 4
         elif self.hparams.mode == 'angular_reco':
@@ -86,7 +90,7 @@ class SSCNN(pl.LightningModule):
                                 minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
         outputs = self(inputs)
         loss = sscnn_loss(outputs, labels, self.hparams.mode)
-        self.log("train_loss", loss, batch_size=self.hparams.batch_size)
+        self.log("train_loss", loss, batch_size=self.hparams.batch_size, sync_dist=True)
         return loss
     
     def validation_step(self, batch, batch_idx):
@@ -95,7 +99,7 @@ class SSCNN(pl.LightningModule):
                                 minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
         outputs = self(inputs)
         loss = sscnn_loss(outputs, labels, self.hparams.mode)
-        self.log("val_loss", loss, batch_size=self.hparams.batch_size)
+        self.log("val_loss", loss, batch_size=self.hparams.batch_size, sync_dist=True)
         self.validation_step_outputs.append(outputs[0].F.detach().cpu().numpy())
         self.validation_step_labels.append(labels.cpu().numpy())
 
@@ -107,14 +111,14 @@ class SSCNN(pl.LightningModule):
             for i in range(preds.shape[0]):
                 angle_diff.append(angle_between(preds[i], truth[i]))
             angle_diff = np.array(angle_diff) * (180/np.pi)
-            self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size)
-            self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size)
+            self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
         elif self.hparams.mode == "energy_reco":
             preds = np.concatenate(self.validation_step_outputs, axis=0)
             truth = np.concatenate(self.validation_step_labels, axis=0)[:,0]
             abs_diff = np.abs(preds - truth)
-            self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size)
-            self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size)
+            self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
         else: # both
             preds_A = np.concatenate(self.validation_step_outputs, axis=0)[:,1:]
             truth_A = np.concatenate(self.validation_step_labels, axis=0)[:,1:]
@@ -122,15 +126,58 @@ class SSCNN(pl.LightningModule):
             for i in range(preds_A.shape[0]):
                 angle_diff.append(angle_between(preds_A[i], truth_A[i]))
             angle_diff = np.array(angle_diff) * (180/np.pi)
-            self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size)
-            self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size)
+            self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
             preds_E = np.concatenate(self.validation_step_outputs, axis=0)
             truth_E = np.concatenate(self.validation_step_labels, axis=0)[:,0]
             abs_diff = np.abs(preds_E - truth_E)
-            self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size)
-            self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size)
+            self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
         self.validation_step_outputs.clear()
         self.validation_step_labels.clear()
+
+    def test_step(self, batch, batch_idx):
+        coords, feats, labels = batch
+        inputs = ME.SparseTensor(feats.float().reshape(coords.shape[0], -1), coords, device=self.device,
+                                minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
+        outputs = self(inputs)
+        self.test_step_outputs.append(outputs[0].F.detach().cpu().numpy())
+        self.test_step_labels.append(labels.cpu().numpy())
+
+    def on_test_epoch_end(self):
+        if self.hparams.mode == "angular_reco":
+            preds = np.concatenate(self.test_step_outputs, axis=0)
+            truth = np.concatenate(self.test_step_labels, axis=0)[:,1:]
+            angle_diff = []
+            for i in range(preds.shape[0]):
+                angle_diff.append(angle_between(preds[i], truth[i]))
+            angle_diff = np.array(angle_diff) * (180/np.pi)
+            self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.test_results['angle_diff'] = angle_diff
+        elif self.hparams.mode == "energy_reco":
+            preds = np.concatenate(self.test_step_outputs, axis=0)
+            truth = np.concatenate(self.test_step_labels, axis=0)[:,0]
+            abs_diff = np.abs(preds - truth)
+            self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
+        else: # both
+            preds_A = np.concatenate(self.test_step_outputs, axis=0)[:,1:]
+            truth_A = np.concatenate(self.test_step_labels, axis=0)[:,1:]
+            angle_diff = []
+            for i in range(preds_A.shape[0]):
+                angle_diff.append(angle_between(preds_A[i], truth_A[i]))
+            angle_diff = np.array(angle_diff) * (180/np.pi)
+            self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
+            preds_E = np.concatenate(self.test_step_outputs, axis=0)
+            truth_E = np.concatenate(self.test_step_labels, axis=0)[:,0]
+            abs_diff = np.abs(preds_E - truth_E)
+            self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
+        self.test_step_outputs.clear()
+        self.test_step_labels.clear()
+        np.save(self.logger.log_dir + "/results.npy", self.test_results)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)

@@ -50,6 +50,13 @@ class PrometheusDataModule(pl.LightningDataModule):
                                             collate_fn=prometheus_collate_fn,
                                             num_workers=len(os.sched_getaffinity(0)),
                                             pin_memory=True)
+    def test_dataloader(self):
+        return torch.utils.data.DataLoader(self.valid_dataset, 
+                                            batch_size = self.cfg['training_options']['batch_size'], 
+                                            shuffle=False,
+                                            collate_fn=prometheus_collate_fn,
+                                            num_workers=len(os.sched_getaffinity(0)),
+                                            pin_memory=True)
 
 class SparsePrometheusDataset(torch.utils.data.Dataset):
     
