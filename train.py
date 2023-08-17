@@ -58,18 +58,18 @@ if __name__=="__main__":
 
     if cfg['training']:
         # initialise the wandb logger and name your wandb project
-        wandb_logger = WandbLogger(project='nt_mlreco', log_model='all')
+        wandb_logger = WandbLogger(project=cfg['project_name'], save_dir=cfg['project_save_dir'], log_model='all')
 
         # add your batch size to the wandb config
         wandb_logger.experiment.config["batch_size"] = cfg['training_options']['batch_size']
 
         lr_monitor = LearningRateMonitor(logging_interval='step')
-        trainer = pl.Trainer(accelerator='gpu', strategy='ddp', devices=2, num_nodes=1, max_epochs=5, log_every_n_steps=10, 
+        trainer = pl.Trainer(accelerator=cfg['accelerator'], strategy='ddp', devices=cfg['num_devices'], num_nodes=1, max_epochs=cfg['training_options']['epochs'], log_every_n_steps=10, 
                             logger=wandb_logger, callbacks=[lr_monitor])
         trainer.fit(model=net, datamodule=dm)
     else:
-        logger = CSVLogger('.', name="nt_mlreco_testing", version="ic_angular_reco_testing")
-        trainer = pl.Trainer(accelerator='gpu', profiler='simple', logger=logger)
-        test_outs = trainer.test(model=net, datamodule=dm)
-        import pdb; pdb.set_trace()
+        wandb_logger = WandbLogger(project="nt_mlreco_testing")
+        wandb_logger.experiment.config["batch_size"] = cfg['training_options']['batch_size']
+        trainer = pl.Trainer(accelerator=cfg['accelerator'], profiler='simple', logger=wandb_logger)
+        trainer.test(model=net, datamodule=dm)
 

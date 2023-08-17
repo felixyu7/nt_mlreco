@@ -14,7 +14,7 @@ class IceCubeDataModule(pl.LightningDataModule):
     
     def prepare_data(self):
         if self.cfg['training']:
-            train_files_list = sorted(glob.glob(self.cfg['data_options']['train_data_file']))[:25]
+            train_files_list = sorted(glob.glob(self.cfg['data_options']['train_data_file']))
             total_train_hits = []
             total_train_labels = []
             for f in train_files_list:
@@ -24,7 +24,7 @@ class IceCubeDataModule(pl.LightningDataModule):
             self.total_train_hits = total_train_hits
             self.total_train_labels = total_train_labels
 
-        val_files_list = sorted(glob.glob(self.cfg['data_options']['valid_data_file']))[:5]
+        val_files_list = sorted(glob.glob(self.cfg['data_options']['valid_data_file']))[:25]
         total_val_hits = []
         total_val_labels = []
         for f in val_files_list:
@@ -79,7 +79,7 @@ class SparseICDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i):
         
-        label = [((np.log10(self.labels[i][0]) - 4) / 2), self.labels[i][1], self.labels[i][2], self.labels[i][3]]
+        label = [np.log10(self.labels[i][0]), self.labels[i][1], self.labels[i][2], self.labels[i][3]]
 
         xs = self.data[i][:,0] * 4.566
         ys = self.data[i][:,1] * 4.566
@@ -110,6 +110,7 @@ def load_i3_data(filename):
     # Create empty lists to store the data
     total_hits = []
     labels = []
+    geo = np.load('/n/home10/felixyu/nt_mlreco/scratch/geo_dict.npy', allow_pickle=True).item()
     # Open the data file
     with dataio.I3File(filename) as f:
         # Loop over all frames in the file
@@ -124,13 +125,9 @@ def load_i3_data(filename):
                 pulse_charges = [[obj.charge for obj in inner_list] for inner_list in pulses]
 
                 om_pos = []
-                # geo = frame['I3Geometry'].omgeo
-                with dataio.I3File('/n/home10/felixyu/NuTel_ML/scratch/geometry.i3') as geo_file:
-                    geo_frame = geo_file.pop_frame()
-                    geo = geo_frame['I3Geometry'].omgeo
-                    for omkey in om_keys:
-                        om_pos.append([geo[omkey].position.x, geo[omkey].position.y, geo[omkey].position.z])
-                    om_pos = np.array(om_pos)
+                for omkey in om_keys:
+                    om_pos.append(geo[omkey])
+                om_pos = np.array(om_pos)
 
                 # convert nested list to flat array
                 pulse_times_arr = np.concatenate(pulse_times)

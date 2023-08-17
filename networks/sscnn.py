@@ -155,6 +155,7 @@ class SSCNN(pl.LightningModule):
             self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size, sync_dist=True)
             self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
             self.test_results['angle_diff'] = angle_diff
+            self.test_results['true_e'] = np.concatenate(self.test_step_labels, axis=0)[:,0]
         elif self.hparams.mode == "energy_reco":
             preds = np.concatenate(self.test_step_outputs, axis=0)
             truth = np.concatenate(self.test_step_labels, axis=0)[:,0]
@@ -181,7 +182,7 @@ class SSCNN(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [1, 10], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [2, 20], gamma=0.1)
         return [optimizer], [scheduler]
 
 def sscnn_loss(outputs, labels, mode):

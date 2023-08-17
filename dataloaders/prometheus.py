@@ -117,7 +117,8 @@ def prometheus_data_prep(data_file, field='mc_truth'):
     
     # energy transforms/normalization
     es = np.log10(es)
-    es_transformed = (es - es.mean()) / (es.std() + 1e-8)
+    es_transformed = es
+    # es_transformed = (es - es.mean()) / (es.std() + 1e-8)
 
     dir_x = np.cos(azimuth) * np.sin(zenith)
     dir_y = np.sin(azimuth) * np.sin(zenith)
