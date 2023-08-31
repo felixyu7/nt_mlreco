@@ -22,15 +22,24 @@ class IceCubeDataModule(pl.LightningDataModule):
                 total_train_hits.extend(hits)
                 total_train_labels.extend(labels)
             self.total_train_hits = total_train_hits
+            total_train_labels = np.array(total_train_labels)
+            es_transformed = np.log10(total_train_labels[:,0])
+            es_transformed = (es_transformed - es_transformed.mean()) / (es_transformed.std() + 1e-8)
+            total_train_labels[:,0] = es_transformed
             self.total_train_labels = total_train_labels
 
-        val_files_list = sorted(glob.glob(self.cfg['data_options']['valid_data_file']))[:25]
+        val_files_list = sorted(glob.glob(self.cfg['data_options']['valid_data_file']))
         total_val_hits = []
         total_val_labels = []
         for f in val_files_list:
             hits, labels = load_i3_data(f)
             total_val_hits.extend(hits)
             total_val_labels.extend(labels)
+        total_val_labels = np.array(total_val_labels)
+        es_transformed_v = np.log10(total_val_labels[:,0])
+        if self.cfg['training']:
+            es_transformed_v = (es_transformed_v - es_transformed_v.mean()) / (es_transformed_v.std() + 1e-8)
+        total_val_labels[:,0] = es_transformed_v
         self.total_val_hits = total_val_hits
         self.total_val_labels = total_val_labels
 
@@ -79,7 +88,7 @@ class SparseICDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i):
         
-        label = [np.log10(self.labels[i][0]), self.labels[i][1], self.labels[i][2], self.labels[i][3]]
+        label = [self.labels[i][0], self.labels[i][1], self.labels[i][2], self.labels[i][3]]
 
         xs = self.data[i][:,0] * 4.566
         ys = self.data[i][:,1] * 4.566

@@ -106,7 +106,7 @@ class SSCNN(pl.LightningModule):
     def on_validation_epoch_end(self):
         if self.hparams.mode == "angular_reco":
             preds = np.concatenate(self.validation_step_outputs, axis=0)
-            truth = np.concatenate(self.validation_step_labels, axis=0)[:,1:]
+            truth = np.concatenate(self.validation_step_labels, axis=0)[:,1:4]
             angle_diff = []
             for i in range(preds.shape[0]):
                 angle_diff.append(angle_between(preds[i], truth[i]))
@@ -120,8 +120,8 @@ class SSCNN(pl.LightningModule):
             self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)
             self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
         else: # both
-            preds_A = np.concatenate(self.validation_step_outputs, axis=0)[:,1:]
-            truth_A = np.concatenate(self.validation_step_labels, axis=0)[:,1:]
+            preds_A = np.concatenate(self.validation_step_outputs, axis=0)[:,1:4]
+            truth_A = np.concatenate(self.validation_step_labels, axis=0)[:,1:4]
             angle_diff = []
             for i in range(preds_A.shape[0]):
                 angle_diff.append(angle_between(preds_A[i], truth_A[i]))
@@ -147,7 +147,7 @@ class SSCNN(pl.LightningModule):
     def on_test_epoch_end(self):
         if self.hparams.mode == "angular_reco":
             preds = np.concatenate(self.test_step_outputs, axis=0)
-            truth = np.concatenate(self.test_step_labels, axis=0)[:,1:]
+            truth = np.concatenate(self.test_step_labels, axis=0)[:,1:4]
             angle_diff = []
             for i in range(preds.shape[0]):
                 angle_diff.append(angle_between(preds[i], truth[i]))
@@ -159,12 +159,14 @@ class SSCNN(pl.LightningModule):
         elif self.hparams.mode == "energy_reco":
             preds = np.concatenate(self.test_step_outputs, axis=0)
             truth = np.concatenate(self.test_step_labels, axis=0)[:,0]
-            abs_diff = np.abs(preds - truth)
-            self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)
-            self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
+            # abs_diff = np.abs(preds - truth)
+            # self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)
+            # self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
+            self.test_results['preds'] = preds
+            self.test_results['truth'] = truth
         else: # both
-            preds_A = np.concatenate(self.test_step_outputs, axis=0)[:,1:]
-            truth_A = np.concatenate(self.test_step_labels, axis=0)[:,1:]
+            preds_A = np.concatenate(self.test_step_outputs, axis=0)[:,1:4]
+            truth_A = np.concatenate(self.test_step_labels, axis=0)[:,1:4]
             angle_diff = []
             for i in range(preds_A.shape[0]):
                 angle_diff.append(angle_between(preds_A[i], truth_A[i]))
@@ -178,7 +180,7 @@ class SSCNN(pl.LightningModule):
             self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
         self.test_step_outputs.clear()
         self.test_step_labels.clear()
-        np.save(self.logger.log_dir + "/results.npy", self.test_results)
+        np.save("/n/home10/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_results.npy", self.test_results)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)

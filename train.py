@@ -2,10 +2,13 @@ import torch
 import numpy as np
 import lightning.pytorch as pl
 import wandb
+import os
 from lightning.pytorch.loggers import WandbLogger, CSVLogger
-from lightning.pytorch.callbacks import LearningRateMonitor
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch import seed_everything
 
 from networks.sscnn import SSCNN
+from networks.generative_uresnet import Generative_UResNet
 
 import yaml
 
@@ -39,18 +42,30 @@ if __name__=="__main__":
         print("Unknown dataloader!")
         exit()
 
-    net = SSCNN(1, reps=cfg['model_options']['reps'], 
-                        depth=cfg['model_options']['depth'], 
-                        first_num_filters=cfg['model_options']['num_filters'], 
-                        stride=cfg['model_options']['stride'], 
-                        dropout=cfg['model_options']['dropout'],
-                        input_dropout=cfg['model_options']['input_dropout'],
-                        output_dropout=cfg['model_options']['output_dropout'],
-                        mode=cfg['model_options']['reco_type'],
-                        D=4,
-                        batch_size=cfg['training_options']['batch_size'], 
-                        lr=cfg['training_options']['lr'], 
-                        weight_decay=cfg['training_options']['weight_decay'])
+    # net = SSCNN(1, reps=cfg['model_options']['reps'], 
+    #                     depth=cfg['model_options']['depth'], 
+    #                     first_num_filters=cfg['model_options']['num_filters'], 
+    #                     stride=cfg['model_options']['stride'], 
+    #                     dropout=cfg['model_options']['dropout'],
+    #                     input_dropout=cfg['model_options']['input_dropout'],
+    #                     output_dropout=cfg['model_options']['output_dropout'],
+    #                     mode=cfg['model_options']['reco_type'],
+    #                     D=4,
+    #                     batch_size=cfg['training_options']['batch_size'], 
+    #                     lr=cfg['training_options']['lr'], 
+    #                     weight_decay=cfg['training_options']['weight_decay'])
+
+    net = Generative_UResNet(2, reps=cfg['model_options']['reps'], 
+                    depth=cfg['model_options']['depth'], 
+                    first_num_filters=cfg['model_options']['num_filters'], 
+                    stride=cfg['model_options']['stride'], 
+                    dropout=cfg['model_options']['dropout'],
+                    input_dropout=cfg['model_options']['input_dropout'],
+                    output_dropout=cfg['model_options']['output_dropout'],
+                    D=3,
+                    batch_size=cfg['training_options']['batch_size'], 
+                    lr=cfg['training_options']['lr'], 
+                    weight_decay=cfg['training_options']['weight_decay'])
 
     if cfg['checkpoint'] != "":
         net = net.load_from_checkpoint(cfg['checkpoint'])
@@ -58,18 +73,20 @@ if __name__=="__main__":
 
     if cfg['training']:
         # initialise the wandb logger and name your wandb project
+        os.environ["WANDB_DIR"] = os.path.abspath("/n/holylfs05/LABS/arguelles_delgado_lab/Everyone/felixyu/nt_mlreco_projects/wandb")
         wandb_logger = WandbLogger(project=cfg['project_name'], save_dir=cfg['project_save_dir'], log_model='all')
 
         # add your batch size to the wandb config
         wandb_logger.experiment.config["batch_size"] = cfg['training_options']['batch_size']
 
         lr_monitor = LearningRateMonitor(logging_interval='step')
-        trainer = pl.Trainer(accelerator=cfg['accelerator'], strategy='ddp', devices=cfg['num_devices'], num_nodes=1, max_epochs=cfg['training_options']['epochs'], log_every_n_steps=10, 
-                            logger=wandb_logger, callbacks=[lr_monitor])
+        checkpoint_callback = ModelCheckpoint(dirpath=cfg['project_save_dir'] + '/' + cfg['project_name'] + '/' + wandb_logger.version + '/checkpoints', every_n_epochs=5)
+        trainer = pl.Trainer(accelerator=cfg['accelerator'], strategy='ddp', devices=cfg['num_devices'], num_nodes=1, max_epochs=cfg['training_options']['epochs'], log_every_n_steps=1, 
+                            logger=wandb_logger, callbacks=[lr_monitor, checkpoint_callback])
         trainer.fit(model=net, datamodule=dm)
     else:
-        wandb_logger = WandbLogger(project="nt_mlreco_testing")
-        wandb_logger.experiment.config["batch_size"] = cfg['training_options']['batch_size']
-        trainer = pl.Trainer(accelerator=cfg['accelerator'], profiler='simple', logger=wandb_logger)
+        logger = WandbLogger(project=cfg['project_name'], save_dir=cfg['project_save_dir'])
+        logger.experiment.config["batch_size"] = cfg['training_options']['batch_size']
+        trainer = pl.Trainer(accelerator=cfg['accelerator'], profiler='simple', logger=logger)
         trainer.test(model=net, datamodule=dm)
 
