@@ -123,41 +123,34 @@ def load_i3_data(filename):
     # Open the data file
     with dataio.I3File(filename) as f:
         # Loop over all frames in the file
-        counter = 0
         while f.more():
-            if counter % 1 == 0:
-                frame = f.pop_physics()
-                pulse_map = dataclasses.I3RecoPulseSeriesMap.from_frame(frame,'InIceDSTPulses')
-                om_keys = pulse_map.keys()
-                pulses = pulse_map.values()
-                pulse_times = [[obj.time for obj in inner_list] for inner_list in pulses]
-                pulse_charges = [[obj.charge for obj in inner_list] for inner_list in pulses]
+            frame = f.pop_physics()
+            pulse_map = dataclasses.I3RecoPulseSeriesMap.from_frame(frame,'InIceDSTPulses')
+            om_keys = pulse_map.keys()
+            pulses = pulse_map.values()
+            pulse_times = [[obj.time for obj in inner_list] for inner_list in pulses]
+            pulse_charges = [[obj.charge for obj in inner_list] for inner_list in pulses]
 
-                om_pos = []
-                for omkey in om_keys:
-                    om_pos.append(geo[omkey])
-                om_pos = np.array(om_pos)
+            om_pos = []
+            for omkey in om_keys:
+                om_pos.append(geo[omkey])
+            om_pos = np.array(om_pos)
 
-                # convert nested list to flat array
-                pulse_times_arr = np.concatenate(pulse_times)
-                pulse_charges_arr = np.concatenate(pulse_charges)
+            # convert nested list to flat array
+            pulse_times_arr = np.concatenate(pulse_times)
+            pulse_charges_arr = np.concatenate(pulse_charges)
 
-                # repeat arr1 for each element in lst
-                om_pos = np.repeat(om_pos, [len(l) for l in pulse_times], axis=0)
+            # repeat arr1 for each element in lst
+            om_pos = np.repeat(om_pos, [len(l) for l in pulse_times], axis=0)
 
-                # concatenate arr1_repeated and arr2
-                hits = np.concatenate((om_pos, pulse_times_arr.reshape((-1, 1)), pulse_charges_arr.reshape((-1, 1))), axis=1)
-                total_hits.append(hits)
+            # concatenate arr1_repeated and arr2
+            hits = np.concatenate((om_pos, pulse_times_arr.reshape((-1, 1)), pulse_charges_arr.reshape((-1, 1))), axis=1)
+            total_hits.append(hits)
 
-                mc_primary = frame['I3MCTree'].primaries[0]
-                # mc_primary = frame['I3MCTree_preMuonProp'].primaries[0]
-                label = [mc_primary.energy, mc_primary.dir.x, mc_primary.dir.y, mc_primary.dir.z]
-                labels.append(label)
-                counter += 1
-            else:
-                frame = f.pop_physics()
-                counter += 1
-                continue
+            mc_primary = frame['I3MCTree'].primaries[0]
+            # mc_primary = frame['I3MCTree_preMuonProp'].primaries[0]
+            label = [mc_primary.energy, mc_primary.dir.x, mc_primary.dir.y, mc_primary.dir.z]
+            labels.append(label)
     return total_hits, labels
 
 def icecube_collate_fn(data_labels):

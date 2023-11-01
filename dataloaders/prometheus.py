@@ -5,6 +5,7 @@ import lightning.pytorch as pl
 import MinkowskiEngine as ME
 import os
 import time
+from collections import defaultdict
 
 class PrometheusDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
@@ -42,14 +43,23 @@ class PrometheusDataModule(pl.LightningDataModule):
     def setup(self, stage=None):
         if self.cfg['training']:
             self.train_dataset = SparsePrometheusDataset(self.train_photons, 
-                                                         self.train_nu, self.cfg['data_options']['scale_factor'], self.cfg['data_options']['first_hit'])
+                                                         self.train_nu, 
+                                                         self.cfg['data_options']['scale_factor'], 
+                                                         self.cfg['data_options']['offset'],
+                                                         self.cfg['data_options']['first_hit'])
             if self.cfg['data_options']['double_dataset']:
                 train_dataset2 = SparsePrometheusDataset(self.train_photons2, 
-                                                         self.train_nu2, self.cfg['data_options']['scale_factor'], self.cfg['data_options']['first_hit'])
+                                                         self.train_nu2, 
+                                                         self.cfg['data_options']['scale_factor'], 
+                                                         self.cfg['data_options']['offset'],
+                                                         self.cfg['data_options']['first_hit'])
                 self.train_dataset = CombinedDataset(self.train_dataset, train_dataset2)
                 
         self.valid_dataset = SparsePrometheusDataset(self.valid_photons, 
-                                                     self.valid_nu, self.cfg['data_options']['scale_factor'], self.cfg['data_options']['first_hit'])
+                                                     self.valid_nu, 
+                                                     self.cfg['data_options']['scale_factor'], 
+                                                     self.cfg['data_options']['offset'],
+                                                     self.cfg['data_options']['first_hit'])
 
     def train_dataloader(self):
         if self.cfg['data_options']['double_dataset']:
@@ -60,17 +70,8 @@ class PrometheusDataModule(pl.LightningDataModule):
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=True,
                                             collate_fn=collate_fn,
-                                            num_workers=0,
+                                            num_workers=len(os.sched_getaffinity(0)),
                                             pin_memory=True)
-        # if self.cfg['data_options']['double_dataset']:
-        #     dataloader_2 = torch.utils.data.DataLoader(self.train_dataset2, 
-        #                                     batch_size = self.cfg['training_options']['batch_size'], 
-        #                                     shuffle=True,
-        #                                     collate_fn=prometheus_collate_fn,
-        #                                     num_workers=len(os.sched_getaffinity(0)),
-        #                                     pin_memory=True)
-        #     # dataloader = zip(dataloader, dataloader_2)
-        #     return [dataloader, dataloader_2]
         return dataloader
             
     def val_dataloader(self):
@@ -78,14 +79,14 @@ class PrometheusDataModule(pl.LightningDataModule):
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
                                             collate_fn=prometheus_collate_fn,
-                                            num_workers=0,
+                                            num_workers=len(os.sched_getaffinity(0)),
                                             pin_memory=True)
     def test_dataloader(self):
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
                                             collate_fn=prometheus_collate_fn,
-                                            num_workers=0,
+                                            num_workers=len(os.sched_getaffinity(0)),
                                             pin_memory=True)
 
 class SparsePrometheusDataset(torch.utils.data.Dataset):
@@ -95,12 +96,14 @@ class SparsePrometheusDataset(torch.utils.data.Dataset):
         photons_data,
         nu_data,
         scale_factor,
+        offset,
         first_hit):
 
         self.data = photons_data
         self.nu_data = nu_data
         self.dataset_size = len(self.data)
         self.scale_factor = scale_factor
+        self.offset = offset
         self.first_hit = first_hit
         
     def __len__(self):
@@ -112,9 +115,9 @@ class SparsePrometheusDataset(torch.utils.data.Dataset):
         label = [self.nu_data[i][0], self.nu_data[i][1], self.nu_data[i][2], self.nu_data[i][3],
                  self.nu_data[i][4], self.nu_data[i][5], self.nu_data[i][6]]
 
-        xs = (self.data[i].photons.sensor_pos_x.to_numpy() - 5.87082946) * self.scale_factor
-        ys = (self.data[i].photons.sensor_pos_y.to_numpy() + 2.51860853)  * self.scale_factor
-        zs = (self.data[i].photons.sensor_pos_z.to_numpy() + 1971.9757655) * self.scale_factor
+        xs = (self.data[i].photons.sensor_pos_x.to_numpy() + self.offset[0]) * self.scale_factor
+        ys = (self.data[i].photons.sensor_pos_y.to_numpy() + self.offset[1])  * self.scale_factor
+        zs = (self.data[i].photons.sensor_pos_z.to_numpy() + self.offset[2]) * self.scale_factor
         ts = self.data[i].photons.t.to_numpy() - self.data[i].photons.t.to_numpy().min()
 
         pos_t = np.array([
@@ -154,28 +157,57 @@ class CombinedDataset(torch.utils.data.Dataset):
 
 def prometheus_data_prep(data_file, field='mc_truth'):
     tsime = time.time()
-    photons_data = ak.from_parquet(data_file, columns=[field, "photons"])
+    # check if data_file is a parquet file or directory. If directory, loop over all contained parquet files
+    photons_data_total = []
+    nu_data_total = []
+    if os.path.isdir(data_file):
+        data_files = os.listdir(data_file)
+        data_files = sorted([os.path.join(data_file, f) for f in data_files if f.endswith('.parquet')])
+    else:
+        data_files = [data_file]
+        
+    for file in data_files:
+        photons_data = ak.from_parquet(file, columns=[field, "photons"])
+        # converting read data to inputs
+        es = np.array(photons_data[field]['initial_state_energy'])
+        zenith = np.array(photons_data[field]['initial_state_zenith'])
+        azimuth = np.array(photons_data[field]['initial_state_azimuth'])
+        x = np.array(photons_data[field]['initial_state_x'])
+        y = np.array(photons_data[field]['initial_state_y'])
+        z = np.array(photons_data[field]['initial_state_z'])
+        
+        # energy transforms/normalization
+        es = np.log10(es)
+        es_transformed = es
+        # es_transformed = (es - es.mean()) / (es.std() + 1e-8)
+
+        dir_x = np.cos(azimuth) * np.sin(zenith)
+        dir_y = np.sin(azimuth) * np.sin(zenith)
+        dir_z = np.cos(zenith)
+        nu_data = np.dstack((es_transformed, dir_x, dir_y, dir_z, x, y, z)).reshape(-1, 7)
+        photons_data = photons_data[[x for x in ak.fields(photons_data) if x != field]]
+        photons_data = reduce_photons_data_precision(photons_data)
+        photons_data_total.append(photons_data)
+        nu_data_total.append(nu_data)
+    # concatenate events from all files
+    photons_data = ak.concatenate(photons_data_total, axis=0)
+    nu_data = np.concatenate(nu_data_total, axis=0)
     print("total time:", time.time() - tsime)
-
-    # converting read data to inputs
-    es = np.array(photons_data[field]['initial_state_energy'])
-    zenith = np.array(photons_data[field]['initial_state_zenith'])
-    azimuth = np.array(photons_data[field]['initial_state_azimuth'])
-    x = np.array(photons_data[field]['initial_state_x'])
-    y = np.array(photons_data[field]['initial_state_y'])
-    z = np.array(photons_data[field]['initial_state_z'])
-    
-    # energy transforms/normalization
-    es = np.log10(es)
-    es_transformed = es
-    # es_transformed = (es - es.mean()) / (es.std() + 1e-8)
-
-    dir_x = np.cos(azimuth) * np.sin(zenith)
-    dir_y = np.sin(azimuth) * np.sin(zenith)
-    dir_z = np.cos(zenith)
-
-    nu_data = np.dstack((es_transformed, dir_x, dir_y, dir_z, x, y, z)).reshape(-1, 7)
     return photons_data, nu_data
+
+def reduce_photons_data_precision(photons_data):
+    converted_dict = {}
+    photons = photons_data.photons
+    for field in photons.fields:
+        if photons[field].type.type.type == ak.types.PrimitiveType('float64'):
+            converted_dict[field] = ak.values_astype(photons[field], 'float32')
+        elif photons[field].type.type.type == ak.types.PrimitiveType('int64'):
+            converted_dict[field] = ak.values_astype(photons[field], 'int32')
+        else:
+            converted_dict[field] = photons[field]
+
+    new_photons_data = ak.Array({'photons': converted_dict})
+    return new_photons_data
 
 def prometheus_collate_fn(data_labels):
     """collate function for data input, creates batched data to be fed into network"""
@@ -194,7 +226,6 @@ def double_prometheus_collate_fn(data_labels):
     """collate function for data input, creates batched data to be fed into network for double dataset option"""
     
     # reverse dictionary/list ordering for collate fn
-    from collections import defaultdict
     # Initialize a default dictionary with empty lists
     result = defaultdict(list)
     # Loop over each dictionary in the list

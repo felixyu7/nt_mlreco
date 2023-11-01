@@ -48,6 +48,14 @@ def angle_between(v1, v2):
     # clip prevents invalid input to arccos
     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0+1e-7, 1.0-1e-7))
 
+def generate_geo_mask(coords, geo_coords):
+    geo_coords = geo_coords.to(coords.device)
+    mask = []
+    for coord in coords:
+        check_contained = torch.any(torch.all(coord[1:4] == geo_coords, axis=1))
+        mask.append(check_contained)
+    return torch.tensor(mask)
+
 def get_p_of_bins(metric, es, bins, p):
     """For a given metric, bin by energy and return the percentile p of the metric for each bin"""
     indices = np.digitize(es, bins)

@@ -3,14 +3,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from networks.common.resnet_block import ResNetBlock
-from networks.common.utils import CombinedAngleEnergyLoss, AngularDistanceLoss, LogCoshLoss, angle_between
+from networks.common.utils import CombinedAngleEnergyLoss, AngularDistanceLoss, LogCoshLoss, angle_between, generate_geo_mask
 import MinkowskiEngine as ME
 import lightning.pytorch as pl
 
 class SSCNN(pl.LightningModule):
-    def __init__(self, in_features, reps=2, depth=8, first_num_filters=16, stride=2, 
-                 expand=False, dropout=0., input_dropout=0., output_dropout=0., scaling='linear', 
-                 output_layer=True, mode='both', D=4, batch_size=128, lr=1e-3, weight_decay=1e-5):
+    def __init__(self, 
+                 in_features=1, 
+                 reps=2, 
+                 depth=8, 
+                 first_num_filters=16, 
+                 stride=2, 
+                 dropout=0., 
+                 input_dropout=0., 
+                 output_dropout=0., 
+                 scaling='linear', 
+                 output_layer=True, 
+                 mode='both', 
+                 D=4, 
+                 batch_size=128, 
+                 lr=1e-3, 
+                 lr_schedule=[2, 20],
+                 weight_decay=1e-5):
         super().__init__()
         self.save_hyperparameters()
 
@@ -50,7 +64,7 @@ class SSCNN(pl.LightningModule):
         for i, planes in enumerate(self.nPlanes):
             m = []
             for _ in range(self.hparams.reps):
-                m.append(ResNetBlock(planes, planes, expand=self.hparams.expand, dropout=self.hparams.dropout))
+                m.append(ResNetBlock(planes, planes, dropout=self.hparams.dropout))
             m = nn.Sequential(*m)
             self.resnet.append(m)
             m = []
@@ -58,7 +72,7 @@ class SSCNN(pl.LightningModule):
                 m.append(ME.MinkowskiConvolution(
                     in_channels=self.nPlanes[i],
                     out_channels=self.nPlanes[i+1],
-                    kernel_size=2, stride=2, dimension=self.hparams.D, expand_coordinates=self.hparams.expand,
+                    kernel_size=2, stride=2, dimension=self.hparams.D,
                     bias=False))
                 m.append(ME.MinkowskiBatchNorm(self.nPlanes[i+1], track_running_stats=True))
                 m.append(ME.MinkowskiPReLU())
@@ -184,15 +198,15 @@ class SSCNN(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [2, 20], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, self.hparams.lr_schedule, gamma=0.1)
         return [optimizer], [scheduler]
 
 def sscnn_loss(outputs, labels, mode):
     preds = outputs[0].F
     if mode == 'both':
-        return CombinedAngleEnergyLoss(preds, labels)
+        return CombinedAngleEnergyLoss(preds, labels[:,:4])
     elif mode == 'angular_reco':
-        return AngularDistanceLoss(preds, labels[:,1:])
+        return AngularDistanceLoss(preds, labels[:,1:4])
     elif mode == 'energy_reco':
         return LogCoshLoss(preds, labels[:,0])
     else:
