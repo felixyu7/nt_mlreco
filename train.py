@@ -4,7 +4,7 @@ import lightning.pytorch as pl
 import wandb
 import os
 from lightning.pytorch.loggers import WandbLogger, CSVLogger
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint, StochasticWeightAveraging
 
 from networks.networks import get_network
 
@@ -25,6 +25,7 @@ def initialize_args():
 if __name__=="__main__":
 
     torch.set_float32_matmul_precision('medium')
+    torch.multiprocessing.set_start_method('spawn')
 
     args = initialize_args()
 
@@ -37,6 +38,9 @@ if __name__=="__main__":
         from dataloaders.lazy_prometheus import LazyPrometheusDataModule
         # dm = PrometheusDataModule(cfg)
         dm = LazyPrometheusDataModule(cfg)
+    elif cfg['dataloader'] == 'prometheus_transformer':
+        from dataloaders.prometheus_transformer import PrometheusTransformerDataModule
+        dm = PrometheusTransformerDataModule(cfg)
     elif cfg['dataloader'] == 'icecube':
         from dataloaders.icecube import IceCubeDataModule
         dm = IceCubeDataModule(cfg)
@@ -54,10 +58,6 @@ if __name__=="__main__":
     else:
         net = get_network(cfg['model'], cfg)
 
-    if cfg['checkpoint'] != "":
-        net = net.load_from_checkpoint(cfg['checkpoint'])
-        print("Loaded checkpoint", cfg['checkpoint'])
-
     if cfg['training']:
         # initialise the wandb logger and name your wandb project
         os.environ["WANDB_DIR"] = os.path.abspath("/n/holylfs05/LABS/arguelles_delgado_lab/Everyone/felixyu/nt_mlreco_projects/wandb")
@@ -72,19 +72,19 @@ if __name__=="__main__":
                                               every_n_epochs=cfg['training_options']['save_epochs'],
                                               save_on_train_epoch_end=True)
         trainer = pl.Trainer(accelerator=cfg['accelerator'], 
-                             strategy='auto', 
-                             devices=cfg['num_devices'], 
-                             num_nodes=1, 
+                             devices=cfg['num_devices'],
                              max_epochs=cfg['training_options']['epochs'],                    
                              log_every_n_steps=1, 
                              logger=wandb_logger, 
-                             callbacks=[lr_monitor, checkpoint_callback])
+                             callbacks=[lr_monitor, checkpoint_callback],
+                             num_sanity_val_steps=0)
         trainer.fit(model=net, datamodule=dm)
     else:
         logger = WandbLogger(project=cfg['project_name'], save_dir=cfg['project_save_dir'])
         logger.experiment.config["batch_size"] = cfg['training_options']['batch_size']
         trainer = pl.Trainer(accelerator=cfg['accelerator'], 
                              profiler='simple', 
-                             logger=logger)
+                             logger=logger,
+                             num_sanity_val_steps=0)
         trainer.test(model=net, datamodule=dm)
 

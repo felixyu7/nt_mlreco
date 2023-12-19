@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from networks.common.resnet_block import ResNetBlock
-from networks.common.utils import generate_geo_mask
+from networks.common.utils import generate_geo_mask, sinusoidal_embedding
 import MinkowskiEngine as ME
 import lightning.pytorch as pl
 
@@ -36,6 +36,10 @@ class Generative_UResNet(pl.LightningModule):
         self.geo = torch.from_numpy(np.load(self.hparams.output_geo_file)).requires_grad_(True)
         self.input_geo = torch.from_numpy(np.load(self.hparams.input_geo_file)).requires_grad_(True)
         self.geo_mask = rowwise_diff(self.input_geo, self.geo, return_mask=True)
+        
+        self.time_embed = nn.Embedding(128, 64)
+        self.time_embed.weight.data = sinusoidal_embedding(128, 64)
+        self.time_embed.requires_grad_(False)
 
         if self.hparams.scaling == 'exp':
             self.nPlanes = [self.hparams.first_num_filters * (2**i) for i in range(self.hparams.depth)]
@@ -91,18 +95,18 @@ class Generative_UResNet(pl.LightningModule):
         self.decoder = nn.Sequential(*self.decoder)
 
         self.probability_pred = nn.Sequential(
-                ME.MinkowskiConvolution(
+            ME.MinkowskiDropout(self.hparams.output_dropout),
+            ME.MinkowskiConvolution(
                 in_channels=self.hparams.first_num_filters,
                 out_channels=1,
-                kernel_size=1, stride=1, dimension=self.hparams.D, bias=False),
-                ME.MinkowskiDropout(self.hparams.output_dropout))
+                kernel_size=1, stride=1, dimension=self.hparams.D, bias=True))
         
         self.timing_pred = nn.Sequential(
-                ME.MinkowskiConvolution(
+            ME.MinkowskiDropout(self.hparams.output_dropout),
+            ME.MinkowskiConvolution(
                 in_channels=self.hparams.first_num_filters,
                 out_channels=1,
-                kernel_size=1, stride=1, dimension=self.hparams.D, bias=False),
-                ME.MinkowskiDropout(self.hparams.output_dropout))
+                kernel_size=1, stride=1, dimension=self.hparams.D, bias=True))
 
     def forward(self, x):
         x = self.input_block(x)
@@ -117,6 +121,15 @@ class Generative_UResNet(pl.LightningModule):
         prob_pred = self.probability_pred(x)
         timing_pred = self.timing_pred(x)
         # if self.hparams.chain:
+        timings = timing_pred.F.flatten()
+        
+        # timings = (10**timings) - 1
+        # new_coords = torch.hstack((timing_pred.C, timings.reshape(-1, 1)))
+        # new_sparse_tensor = ME.SparseTensor(torch.sigmoid(prob_pred.F.reshape(-1, 1)), 
+        #                                                 new_coords.int(), 
+        #                                                 device=self.device,
+        #                                     minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
+        
         scores = torch.sigmoid(prob_pred.F.flatten())
         coords = prob_pred.C[scores > 0.5]
         timings = timing_pred.F.flatten()[scores > 0.5]
@@ -129,10 +142,11 @@ class Generative_UResNet(pl.LightningModule):
         # return prob_pred, timing_pred
     
     def training_step(self, batch, batch_idx):
-        coords, feats, _ = batch
-        inputs, output_geo_mask = ntsr_preprocess(self, coords, feats)
+        coords_masked, feats_masked, coords, feats, _ = batch
+        import pdb; pdb.set_trace()
+        inputs, output_geo_mask, masked_inds = ntsr_preprocess(self, coords_masked, feats_masked)
         prob_pred, timing_pred, _ = self(inputs)
-        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, batch, self.geo, self.geo_mask, output_geo_mask)
+        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, coords, self.geo, masked_inds, output_geo_mask)
         loss = cls_loss + timing_loss
         self.log("train_loss", loss, batch_size=self.hparams.batch_size)
         self.log("cls_loss", cls_loss, batch_size=self.hparams.batch_size)
@@ -140,10 +154,10 @@ class Generative_UResNet(pl.LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
-        coords, feats, _ = batch
-        inputs, output_geo_mask = ntsr_preprocess(self, coords, feats)
+        coords_masked, feats_masked, coords, feats, _ = batch
+        inputs, output_geo_mask, masked_inds = ntsr_preprocess(self, coords_masked, feats_masked)
         prob_pred, timing_pred, _ = self(inputs)
-        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, batch, self.geo, self.geo_mask, output_geo_mask)
+        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, coords, self.geo, masked_inds, output_geo_mask)
         loss = cls_loss + timing_loss
         self.log("val_train_loss", loss, batch_size=self.hparams.batch_size)
         self.log("val_cls_loss", cls_loss, batch_size=self.hparams.batch_size)
@@ -166,7 +180,7 @@ class Generative_UResNet(pl.LightningModule):
     
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, [10, 40], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, self.hparams.lr_schedule, gamma=0.1)
         return [optimizer], [scheduler]
 
 def ntsr_preprocess(net, coords, feats):
@@ -184,44 +198,83 @@ def ntsr_preprocess(net, coords, feats):
     pt_feats = pt_feats[output_geo_mask]
     inputs = ME.SparseTensor(pt_feats, pt_coords.int(), device=net.device,
                             minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
-    return inputs, output_geo_mask
+    return inputs, output_geo_mask, (pt_feats[:,0] == 0).float()
 
-def uresnet_loss(prob_pred, timing_pred, truth, geo, geo_mask, output_geo_mask):
+def uresnet_loss(prob_pred, timing_pred, unmasked_coords, geo, masked_inds, counts, output_geo_mask):
     score_feats = prob_pred.F.flatten()
     timing_feats = timing_pred.F.flatten()
     # scores = torch.sigmoid(score_feats)
-    truth_feats, _ = get_probability_and_timing_features(truth[0][:,:4].to(score_feats.device).float(), 
+    # counts = torch.log10(counts)
+    truth_feats, _ = get_probability_and_timing_features(unmasked_coords[:,:4].to(score_feats.device).float(), 
                                                                 geo.to(score_feats.device).float(), 
-                                                                truth[0][:,4].reshape(-1, 1).to(score_feats.device).float(),
+                                                                unmasked_coords[:,4].reshape(-1, 1).to(score_feats.device).float(),
+                                                                # counts=counts.reshape(-1, 1).to(score_feats.device).float(),
                                                                 prob_fill_value=0.)
     truth_feats = truth_feats[output_geo_mask]
-    _, counts = torch.unique(prob_pred.C[:,0], return_counts=True)
-    cumulative_counts = counts.cumsum(dim=0)
-    cls_losses = []
-    timing_losses = []
-    start = 0
-    for end in cumulative_counts:
-        # only compute loss on masked coords
-        batch_score_feats = score_feats[start:end]
-        batch_timing_feats = timing_feats[start:end]
-        batch_truth_feats = truth_feats[start:end]
-        # weight_scaling_factor = batch_truth_feats[:,0].shape[0] / ((batch_truth_feats[:,0].sum() * 2) + 1e-8)
-        # weight = (batch_truth_feats[:,0] * (weight_scaling_factor - 1)) + 1.
-        cls_loss = F.binary_cross_entropy_with_logits(batch_score_feats, batch_truth_feats[:,0])
-        true_time = torch.log10(batch_truth_feats[:,1] + 1)
-        # true_time = (true_time - true_time.mean()) / (true_time.std() + 1e-8)
-        timing_loss = F.smooth_l1_loss(batch_timing_feats, true_time, reduction='none')
-        truth_mask = (batch_truth_feats[:,1] > 0).float()
-        timing_loss = (timing_loss * truth_mask).sum() / (truth_mask.sum() + 1e-8)
-        # truth_mask = (batch_truth_feats[:,1] > 0) * (weight_scaling_factor - 1)
-        # truth_mask = truth_mask + 1.
-        # timing_loss = (timing_loss * truth_mask.float()).sum() / (truth_mask.sum() + 1e-8)
-        cls_losses.append(cls_loss)
-        timing_losses.append(timing_loss)
-        start = end
-    mean_cls_loss = torch.stack(cls_losses).mean()
-    mean_timing_loss = torch.stack(timing_losses).mean()
+    mean_cls_loss = F.binary_cross_entropy_with_logits(score_feats, truth_feats[:,0])
+    # mean_cls_loss = F.mse_loss(score_feats, truth_feats[:,2])
+    # cls_loss = F.mse_loss(torch.sigmoid(score_feats), truth_feats[:,0], reduction='none')
+    # mean_cls_loss = (cls_loss * masked_inds).sum() / (masked_inds.sum() + 1e-8)
+    
+    true_time = torch.log10(truth_feats[:,1] + 1)
+    timing_loss = F.smooth_l1_loss(timing_feats, true_time, reduction='none')
+    truth_mask = (truth_feats[:,1] > 0).float()
+    mean_timing_loss = (timing_loss * truth_mask).sum() / (truth_mask.sum() + 1e-8)
+    
+    # _, counts = torch.unique(prob_pred.C[:,0], return_counts=True)
+    # cumulative_counts = counts.cumsum(dim=0)
+    # cls_losses = []
+    # timing_losses = []
+    # start = 0
+    # for end in cumulative_counts:
+    #     # only compute loss on masked coords
+    #     batch_score_feats = score_feats[start:end]
+    #     batch_timing_feats = timing_feats[start:end]
+    #     batch_truth_feats = truth_feats[start:end]
+    #     # weight_scaling_factor = batch_truth_feats[:,0].shape[0] / ((batch_truth_feats[:,0].sum() * 2) + 1e-8)
+    #     # weight = (batch_truth_feats[:,0] * (weight_scaling_factor - 1)) + 1.
+    #     cls_loss = F.binary_cross_entropy_with_logits(batch_score_feats, batch_truth_feats[:,0])
+    #     true_time = torch.log10(batch_truth_feats[:,1] + 1)
+    #     # true_time = (true_time - true_time.mean()) / (true_time.std() + 1e-8)
+    #     timing_loss = F.smooth_l1_loss(batch_timing_feats, true_time, reduction='none')
+    #     truth_mask = (batch_truth_feats[:,1] > 0).float()
+    #     timing_loss = (timing_loss * truth_mask).sum() / (truth_mask.sum() + 1e-8)
+    #     # truth_mask = (batch_truth_feats[:,1] > 0) * (weight_scaling_factor - 1)
+    #     # truth_mask = truth_mask + 1.
+    #     # timing_loss = (timing_loss * truth_mask.float()).sum() / (truth_mask.sum() + 1e-8)
+    #     cls_losses.append(cls_loss)
+    #     timing_losses.append(timing_loss)
+    #     start = end
+    # mean_cls_loss = torch.stack(cls_losses).mean()
+    # mean_timing_loss = torch.stack(timing_losses).mean()
     return mean_cls_loss, mean_timing_loss
+
+def directional_loss(pred, gt, N=5):
+    # Sort the coordinates by time
+    pred = pred[pred[:,3].argsort()]
+    gt = gt[gt[:,3].argsort()]
+
+    # Compute the directional vectors for the predicted set
+    pred_vectors = pred.unsqueeze(1).repeat(1, pred.size(0), 1) - pred.unsqueeze(0)
+    pred_vectors = pred_vectors[pred_vectors[:,3].argsort()][:,:N]
+    pred_vectors = pred_vectors.mean(dim=1)
+
+    # Compute the directional vectors for the ground truth set
+    gt_vectors = gt.unsqueeze(1).repeat(1, gt.size(0), 1) - gt.unsqueeze(0)
+    gt_vectors = gt_vectors[gt_vectors[:,3].argsort()][:,:N]
+    gt_vectors = gt_vectors.mean(dim=1)
+
+    # Compute the nearest ground truth vector for each predicted vector
+    dists = torch.cdist(pred_vectors, gt_vectors)
+    nearest_gt_vectors = gt_vectors[dists.min(dim=1)[1]]
+
+    # Compute the cosine similarity between the predicted vectors and the nearest ground truth vectors
+    cos_sim = F.cosine_similarity(pred_vectors, nearest_gt_vectors, dim=1)
+
+    # Compute the loss as the negative mean cosine similarity
+    loss = -cos_sim.mean()
+
+    return loss
 
 def extract_near_points(larger_set, coords, exclusion_set, x):
     batch_size = coords[:,0].unique().shape[0]

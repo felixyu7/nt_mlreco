@@ -194,7 +194,7 @@ class SSCNN(pl.LightningModule):
             self.log("mean_abs_energy_diff", abs_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
         self.test_step_outputs.clear()
         self.test_step_labels.clear()
-        np.save("/n/home10/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_results.npy", self.test_results)
+        np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_results.npy", self.test_results)
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)

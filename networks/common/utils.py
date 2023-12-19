@@ -48,13 +48,47 @@ def angle_between(v1, v2):
     # clip prevents invalid input to arccos
     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0+1e-7, 1.0-1e-7))
 
+@torch.compile
 def generate_geo_mask(coords, geo_coords):
-    geo_coords = geo_coords.to(coords.device)
-    mask = []
-    for coord in coords:
-        check_contained = torch.any(torch.all(coord[1:4] == geo_coords, axis=1))
-        mask.append(check_contained)
-    return torch.tensor(mask)
+    if coords.shape[1] == 5:
+        mask = (coords[:, 1:4] == geo_coords[:, None]).all(dim=2).any(dim=0)
+    else:
+        mask = (coords[:, :3] == geo_coords[:, None]).all(dim=2).any(dim=0)
+    return mask
+
+def generate_geo_mask_cuda(coords, geo_coords, cuda=True, chunk_size=-1):
+    if not cuda:
+        geo_coords = geo_coords.to(coords.device)
+        if coords.shape[1] == 5:
+            mask = (coords[:, 1:4] == geo_coords[:, None]).all(dim=2).any(dim=0)
+        else:
+            mask = (coords[:, :3] == geo_coords[:, None]).all(dim=2).any(dim=0)
+        return mask
+    else:
+        if ((chunk_size == -1) or (chunk_size > coords.shape[0])):
+            chunk_size = coords.shape[0]
+        mask = torch.zeros(coords.shape[0], dtype=torch.bool, device='cpu')
+        geo_coords_gpu = geo_coords.cuda()
+        for i in range(0, coords.shape[0], chunk_size):
+            end = min(i+chunk_size, coords.shape[0])
+            coords_chunk = coords[i:end].cuda()
+            if coords.shape[1] == 5:
+                mask_chunk = (coords_chunk[:, 1:4] == geo_coords_gpu[:, None]).all(dim=2).any(dim=0)
+            else:
+                mask_chunk = (coords_chunk[:, :3] == geo_coords_gpu[:, None]).all(dim=2).any(dim=0)
+            mask[i:end] = mask_chunk.cpu()
+        return mask
+
+def sinusoidal_embedding(n, d):
+    # Returns the standard positional embedding
+    embedding = torch.zeros(n, d)
+    wk = torch.tensor([1 / 10_000 ** (2 * j / d) for j in range(d)])
+    wk = wk.reshape((1, d))
+    t = torch.arange(n).reshape((n, 1))
+    embedding[:,::2] = torch.sin(t * wk[:,::2])
+    embedding[:,1::2] = torch.cos(t * wk[:,::2])
+
+    return embedding
 
 def get_p_of_bins(metric, es, bins, p):
     """For a given metric, bin by energy and return the percentile p of the metric for each bin"""

@@ -11,7 +11,7 @@ import polars
 from collections import OrderedDict
 from bisect import bisect_right
 import glob
-from networks.common.utils import generate_geo_mask
+from networks.common.utils import generate_geo_mask_cuda
 
 class LazyPrometheusDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
@@ -37,7 +37,9 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
                                                             self.cfg['data_options']['first_hit'])
             
     def train_dataloader(self):
-        collate_fn = prometheus_collate_fn
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
+                                        return_original=self.cfg['data_options']['return_original'],
+                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         # dataloader = torch.utils.data.DataLoader(self.train_dataset, 
         #                                     batch_size = self.cfg['training_options']['batch_size'], 
         #                                     shuffle=True,
@@ -50,17 +52,22 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
                                             sampler=sampler,
                                             collate_fn=collate_fn,
                                             pin_memory=True,
+                                            persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
         return dataloader
     
     def val_dataloader(self):
         sampler = ParquetFileSampler(self.valid_dataset, self.valid_dataset.cumulative_lengths, self.cfg['training_options']['batch_size'])
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
+                                        return_original=self.cfg['data_options']['return_original'],
+                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             # shuffle=True,
                                             sampler=sampler,
-                                            collate_fn=prometheus_collate_fn,
+                                            collate_fn=collate_fn,
                                             pin_memory=True,
+                                            persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
         # return torch.utils.data.DataLoader(self.valid_dataset, 
         #                                     batch_size = self.cfg['training_options']['batch_size'], 
@@ -69,11 +76,15 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
         #                                     num_workers=len(os.sched_getaffinity(0)))
 
     def test_dataloader(self):
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
+                                        return_original=self.cfg['data_options']['return_original'],
+                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
-                                            collate_fn=prometheus_collate_fn,
+                                            collate_fn=collate_fn,
                                             pin_memory=True,
+                                            persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
          
 class LazySparsePrometheusDataset(torch.utils.data.Dataset):
@@ -83,16 +94,12 @@ class LazySparsePrometheusDataset(torch.utils.data.Dataset):
         files,
         scale_factor,
         offset,
-        first_hit,
-        masking=False,
-        input_geo_file=''):
+        first_hit):
 
         self.files = files
         self.scale_factor = scale_factor
         self.offset = offset
         self.first_hit = first_hit
-        self.masking = masking
-        self.input_geo_file = input_geo_file
         
         num_events = []
         for file in self.files:
@@ -107,9 +114,6 @@ class LazySparsePrometheusDataset(torch.utils.data.Dataset):
         
         # self.cache = OrderedDict()
         # self.cache_size = 20
-        
-        if self.input_geo_file != '':
-            self.input_geo = torch.from_numpy(np.load(self.input_geo_file))
 
     def __len__(self):
         return self.dataset_size
@@ -179,10 +183,7 @@ class LazySparsePrometheusDataset(torch.utils.data.Dataset):
         pos_t = torch.from_numpy(pos_t)
         feats = torch.from_numpy(feats).view(-1, 1)
         label = torch.from_numpy(np.array([label]))
-        if self.masking:
-            mask = generate_geo_mask(pos_t, self.input_geo)
-            pos_t = pos_t[mask]
-            feats = feats[mask]
+
         return pos_t, feats, label
 
 class ParquetFileSampler(torch.utils.data.Sampler):
@@ -212,15 +213,33 @@ class ParquetFileSampler(torch.utils.data.Sampler):
     def __len__(self):
        return len(self.data_source)
 
-def prometheus_collate_fn(data_labels):
-    """collate function for data input, creates batched data to be fed into network"""
-    coords, feats, labels = list(zip(*data_labels))
-
-    # Create batched coordinates for the SparseTensor input
-    bcoords = ME.utils.batched_coordinates(coords)
-
-    # Concatenate all lists
-    feats_batch = torch.from_numpy(np.concatenate(feats, 0)).float()
-    labels_batch = torch.from_numpy(np.concatenate(labels, 0)).float()
+class PrometheusCollator(object):
     
-    return bcoords, feats_batch, labels_batch
+    def __init__(self, masking=False, return_original=False, input_geo_file=''):
+        self.masking = masking
+        self.return_original = return_original
+        self.input_geo_file = input_geo_file
+        if self.input_geo_file != '':
+            self.input_geo = torch.from_numpy(np.load(self.input_geo_file))
+            
+    def __call__(self, data_labels):
+        """collate function for data input, creates batched data to be fed into network"""
+        coords, feats, labels = list(zip(*data_labels))
+
+        # Create batched coordinates for the SparseTensor input
+        bcoords = ME.utils.batched_coordinates(coords)
+
+        # Concatenate all lists
+        feats_batch = torch.from_numpy(np.concatenate(feats, 0)).float()
+        labels_batch = torch.from_numpy(np.concatenate(labels, 0)).float()
+
+        if self.masking:
+            mask = generate_geo_mask_cuda(bcoords, self.input_geo, cuda=True, chunk_size=100000)
+            bcoords_masked = bcoords[mask]
+            feats_batch_masked = feats_batch[mask]
+            if self.return_original:
+                return bcoords_masked, feats_batch_masked, bcoords, feats_batch, labels_batch
+            else:
+                return bcoords_masked, feats_batch_masked, labels_batch
+            
+        return bcoords, feats_batch, labels_batch

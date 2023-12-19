@@ -6,6 +6,7 @@ import MinkowskiEngine as ME
 import os
 import time
 from collections import defaultdict
+from networks.common.utils import generate_geo_mask
 
 class PrometheusDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
@@ -22,14 +23,6 @@ class PrometheusDataModule(pl.LightningDataModule):
                 t_nu_data = t_nu_data[event_list]
             self.train_photons = t_photons_data
             self.train_nu = t_nu_data
-            if self.cfg['data_options']['double_dataset']:
-                t_photons_data2, t_nu_data2 = prometheus_data_prep(self.cfg['data_options']['train_data_file2'])
-                if self.cfg['data_options']['train_event_list2'] != '':
-                    event_list = np.loadtxt(self.cfg['data_options']['train_event_list2']).astype(np.int32)
-                    t_photons_data2 = t_photons_data2[event_list]
-                    t_nu_data2 = t_nu_data2[event_list]
-                self.train_photons2 = t_photons_data2
-                self.train_nu2 = t_nu_data2
 
         v_photons_data, v_nu_data = prometheus_data_prep(self.cfg['data_options']['valid_data_file'])
         if self.cfg['data_options']['valid_event_list'] != '':
@@ -47,13 +40,6 @@ class PrometheusDataModule(pl.LightningDataModule):
                                                          self.cfg['data_options']['scale_factor'], 
                                                          self.cfg['data_options']['offset'],
                                                          self.cfg['data_options']['first_hit'])
-            if self.cfg['data_options']['double_dataset']:
-                train_dataset2 = SparsePrometheusDataset(self.train_photons2, 
-                                                         self.train_nu2, 
-                                                         self.cfg['data_options']['scale_factor'], 
-                                                         self.cfg['data_options']['offset'],
-                                                         self.cfg['data_options']['first_hit'])
-                self.train_dataset = CombinedDataset(self.train_dataset, train_dataset2)
                 
         self.valid_dataset = SparsePrometheusDataset(self.valid_photons, 
                                                      self.valid_nu, 
@@ -62,31 +48,30 @@ class PrometheusDataModule(pl.LightningDataModule):
                                                      self.cfg['data_options']['first_hit'])
 
     def train_dataloader(self):
-        if self.cfg['data_options']['double_dataset']:
-            collate_fn = double_prometheus_collate_fn
-        else:
-            collate_fn = prometheus_collate_fn
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], input_geo_file=self.cfg['data_options']['input_geo_file'])
         dataloader = torch.utils.data.DataLoader(self.train_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=True,
                                             collate_fn=collate_fn,
-                                            num_workers=len(os.sched_getaffinity(0)),
+                                            num_workers=self.cfg['training_options']['num_workers'],
                                             pin_memory=True)
         return dataloader
             
     def val_dataloader(self):
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], input_geo_file=self.cfg['data_options']['input_geo_file'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
-                                            collate_fn=prometheus_collate_fn,
-                                            num_workers=len(os.sched_getaffinity(0)),
+                                            collate_fn=collate_fn,
+                                            num_workers=self.cfg['training_options']['num_workers'],
                                             pin_memory=True)
     def test_dataloader(self):
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], input_geo_file=self.cfg['data_options']['input_geo_file'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
-                                            collate_fn=prometheus_collate_fn,
-                                            num_workers=len(os.sched_getaffinity(0)),
+                                            collate_fn=collate_fn,
+                                            num_workers=self.cfg['training_options']['num_workers'],
                                             pin_memory=True)
 
 class SparsePrometheusDataset(torch.utils.data.Dataset):
@@ -186,7 +171,7 @@ def prometheus_data_prep(data_file, field='mc_truth'):
         dir_z = np.cos(zenith)
         nu_data = np.dstack((es_transformed, dir_x, dir_y, dir_z, x, y, z)).reshape(-1, 7)
         photons_data = photons_data[[x for x in ak.fields(photons_data) if x != field]]
-        photons_data = reduce_photons_data_precision(photons_data)
+        # photons_data = reduce_photons_data_precision(photons_data)
         photons_data_total.append(photons_data)
         nu_data_total.append(nu_data)
     # concatenate events from all files
@@ -209,32 +194,29 @@ def reduce_photons_data_precision(photons_data):
     new_photons_data = ak.Array({'photons': converted_dict})
     return new_photons_data
 
-def prometheus_collate_fn(data_labels):
-    """collate function for data input, creates batched data to be fed into network"""
-    coords, feats, labels = list(zip(*data_labels))
-
-    # Create batched coordinates for the SparseTensor input
-    bcoords = ME.utils.batched_coordinates(coords)
-
-    # Concatenate all lists
-    feats_batch = torch.from_numpy(np.concatenate(feats, 0)).float()
-    labels_batch = torch.from_numpy(np.concatenate(labels, 0)).float()
+class PrometheusCollator(object):
     
-    return bcoords, feats_batch, labels_batch
+    def __init__(self, masking=False, input_geo_file=''):
+        self.masking = masking
+        self.input_geo_file = input_geo_file
+        if self.input_geo_file != '':
+            self.input_geo = torch.from_numpy(np.load(self.input_geo_file))
+            
+    def __call__(self, data_labels):
+        """collate function for data input, creates batched data to be fed into network"""
+        coords, feats, labels = list(zip(*data_labels))
 
-def double_prometheus_collate_fn(data_labels):
-    """collate function for data input, creates batched data to be fed into network for double dataset option"""
-    
-    # reverse dictionary/list ordering for collate fn
-    # Initialize a default dictionary with empty lists
-    result = defaultdict(list)
-    # Loop over each dictionary in the list
-    for dct in data_labels:
-        # Loop over each key-value pair in the dictionary
-        for key, value in dct.items():
-            # Append the value to the appropriate list in the result dictionary
-            result[key].append(value)
-    
-    bcoords1, feats_batch1, labels_batch1 = prometheus_collate_fn(result['input'])
-    bcoords2, feats_batch2, labels_batch2 = prometheus_collate_fn(result['truth'])
-    return [bcoords1, feats_batch1, labels_batch1], [bcoords2, feats_batch2, labels_batch2]
+        # Create batched coordinates for the SparseTensor input
+        bcoords = ME.utils.batched_coordinates(coords)
+
+        # Concatenate all lists
+        feats_batch = torch.from_numpy(np.concatenate(feats, 0)).float()
+        labels_batch = torch.from_numpy(np.concatenate(labels, 0)).float()
+
+        if self.masking:
+            mask = generate_geo_mask(bcoords, self.input_geo)
+            bcoords_masked = bcoords[mask]
+            feats_batch_masked = feats_batch[mask]
+            return bcoords_masked, feats_batch_masked, bcoords, feats_batch, labels_batch
+
+        return bcoords, feats_batch, labels_batch

@@ -40,14 +40,14 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
                                 minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True,
                                 coordinate_manager=new_sparse_tensor.coordinate_manager)
         sscnn_input_tensor = sscnn_input_tensor + new_sparse_tensor
-        return prob_pred, timing_pred, self.sscnn(sscnn_input_tensor)
+        return prob_pred, timing_pred, self.sscnn(sscnn_input_tensor), sscnn_input_tensor
     
     def training_step(self, batch, batch_idx):
-        coords, feats, labels = batch
-        ntsr_inputs, output_geo_mask = ntsr_preprocess(self.ntsr, coords, feats)
-        sscnn_inputs = [feats, coords]
-        prob_pred, timing_pred, sscnn_outputs = self(ntsr_inputs, sscnn_inputs)
-        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, batch, self.ntsr.geo, self.ntsr.geo_mask, output_geo_mask)
+        coords_masked, feats_masked, coords, feats, labels = batch
+        ntsr_inputs, output_geo_mask, masked_inds = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
+        sscnn_inputs = [feats_masked, coords_masked]
+        prob_pred, timing_pred, sscnn_outputs, _ = self(ntsr_inputs, sscnn_inputs)
+        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, coords, self.ntsr.geo, masked_inds, feats, output_geo_mask)
         angular_loss = sscnn_loss(sscnn_outputs, labels, 'angular_reco')
         loss = cls_loss + timing_loss + angular_loss
         self.log("train_loss", loss, batch_size=self.hparams.batch_size)
@@ -57,11 +57,11 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
         return loss
     
     def validation_step(self, batch, batch_idx):
-        coords, feats, labels = batch
-        ntsr_inputs, output_geo_mask = ntsr_preprocess(self.ntsr, coords, feats)
-        sscnn_inputs = [feats, coords]
-        prob_pred, timing_pred, sscnn_outputs = self(ntsr_inputs, sscnn_inputs)
-        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, batch, self.ntsr.geo, self.ntsr.geo_mask, output_geo_mask)
+        coords_masked, feats_masked, coords, feats, labels = batch
+        ntsr_inputs, output_geo_mask, masked_inds = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
+        sscnn_inputs = [feats_masked, coords_masked]
+        prob_pred, timing_pred, sscnn_outputs, _ = self(ntsr_inputs, sscnn_inputs)
+        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, coords, self.ntsr.geo, masked_inds, feats, output_geo_mask)
         angular_loss = sscnn_loss(sscnn_outputs, labels, 'angular_reco')
         loss = cls_loss + timing_loss + angular_loss
         self.log("val_train_loss", loss, batch_size=self.hparams.batch_size)
@@ -74,13 +74,20 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
     #     self.sscnn.on_validation_epoch_end()
         
     def test_step(self, batch, batch_idx):
-        coords, feats, labels = batch
-        ntsr_inputs, _ = ntsr_preprocess(self.ntsr, coords, feats)
-        sscnn_inputs = [feats, coords]
-        prob_pred, timing_pred, sscnn_outputs = self(ntsr_inputs, sscnn_inputs)
+        coords_masked, feats_masked, coords, feats, labels = batch
+        ntsr_inputs, output_geo_mask, masked_inds = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
+        sscnn_inputs = [feats_masked, coords_masked]
+        prob_pred, timing_pred, sscnn_outputs, sscnn_input_tensor = self(ntsr_inputs, sscnn_inputs)
         
         self.test_step_outputs.append(sscnn_outputs[0].F.detach().cpu().numpy())
         self.test_step_labels.append(labels.cpu().numpy())
+        
+        # vis a batch of events
+        import pdb; pdb.set_trace()
+        if batch_idx == 0:
+            np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_masked_events.npy", coords_masked.cpu().numpy())
+            np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_unmasked_events.npy", coords.cpu().numpy())
+            np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_pred_events.npy", sscnn_input_tensor.C.detach().cpu().numpy())
         
     def on_test_epoch_end(self):
         preds = np.concatenate(self.test_step_outputs, axis=0)
@@ -96,7 +103,7 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
         
         self.test_step_outputs.clear()
         self.test_step_labels.clear()
-        np.save("/n/home10/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_results.npy", self.test_results)
+        np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_results.npy", self.test_results)
         
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
