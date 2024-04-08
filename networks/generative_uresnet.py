@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from networks.common.resnet_block import ResNetBlock
-from networks.common.utils import generate_geo_mask, sinusoidal_embedding
+from networks.common.unet import UNet
+from networks.common.utils import rowwise_diff
 import MinkowskiEngine as ME
 import lightning.pytorch as pl
 
@@ -36,63 +36,16 @@ class Generative_UResNet(pl.LightningModule):
         self.geo = torch.from_numpy(np.load(self.hparams.output_geo_file)).requires_grad_(True)
         self.input_geo = torch.from_numpy(np.load(self.hparams.input_geo_file)).requires_grad_(True)
         self.geo_mask = rowwise_diff(self.input_geo, self.geo, return_mask=True)
-        
-        self.time_embed = nn.Embedding(128, 64)
-        self.time_embed.weight.data = sinusoidal_embedding(128, 64)
-        self.time_embed.requires_grad_(False)
 
-        if self.hparams.scaling == 'exp':
-            self.nPlanes = [self.hparams.first_num_filters * (2**i) for i in range(self.hparams.depth)]
-        else:
-            self.nPlanes = [i * self.hparams.first_num_filters for i in range(1, self.hparams.depth + 1)]
-
-        self.input_block = nn.Sequential(
-                ME.MinkowskiConvolution(
-                in_channels=self.hparams.in_features,
-                out_channels=self.hparams.first_num_filters,
-                kernel_size=3, stride=1, dimension=self.hparams.D, dilation=1,
-                bias=False),
-                ME.MinkowskiPReLU(),
-                ME.MinkowskiDropout(self.hparams.input_dropout))
-
-        # self.mask_token = nn.Parameter(torch.zeros(1, self.nPlanes[-1]))
-        # nn.init.normal_(self.mask_token, std=.02)
-
-        self.encoder = []
-        for i, planes in enumerate(self.nPlanes):
-            if i < self.hparams.depth - 1:
-                m = []
-                for _ in range(self.hparams.reps):
-                    m.append(ResNetBlock(planes, planes, dimension=self.hparams.D, dropout=self.hparams.dropout))
-                # m = nn.Sequential(*m)
-                # self.encoder.append(m)
-                # m = []
-                m.append(ME.MinkowskiConvolution(
-                    in_channels=self.nPlanes[i],
-                    out_channels=self.nPlanes[i+1],
-                    kernel_size=self.hparams.stride, stride=self.hparams.stride, dimension=self.hparams.D, bias=False))
-                m.append(ME.MinkowskiBatchNorm(self.nPlanes[i+1], track_running_stats=True))
-                m.append(ME.MinkowskiPReLU())
-                m = nn.Sequential(*m)
-                self.encoder.append(m)
-        self.encoder = nn.Sequential(*self.encoder)
-
-        self.decoder = []
-        # reverse order
-        for i, planes in reversed(list(enumerate(self.nPlanes))):
-            if i > 0:
-                m = []
-                for _ in range(self.hparams.reps):
-                    m.append(ResNetBlock(planes, planes, dimension=self.hparams.D, dropout=self.hparams.dropout))
-                m.append(ME.MinkowskiConvolutionTranspose(
-                    in_channels=self.nPlanes[i],
-                    out_channels=self.nPlanes[i-1],
-                    kernel_size=self.hparams.stride, stride=self.hparams.stride, dimension=self.hparams.D, bias=False))
-                m.append(ME.MinkowskiBatchNorm(self.nPlanes[i-1], track_running_stats=True))
-                m.append(ME.MinkowskiPReLU())
-                m = nn.Sequential(*m)
-                self.decoder.append(m)
-        self.decoder = nn.Sequential(*self.decoder)
+        self.unet = UNet(in_features=self.hparams.in_features,
+                            reps=self.hparams.reps,
+                            depth=self.hparams.depth,
+                            first_num_filters=self.hparams.first_num_filters,
+                            stride=self.hparams.stride,
+                            dropout=self.hparams.dropout,
+                            input_dropout=self.hparams.input_dropout,
+                            scaling=self.hparams.scaling,
+                            D=self.hparams.D)
 
         self.probability_pred = nn.Sequential(
             ME.MinkowskiDropout(self.hparams.output_dropout),
@@ -100,7 +53,14 @@ class Generative_UResNet(pl.LightningModule):
                 in_channels=self.hparams.first_num_filters,
                 out_channels=1,
                 kernel_size=1, stride=1, dimension=self.hparams.D, bias=True))
-        
+
+        self.counts_pred = nn.Sequential(
+            ME.MinkowskiDropout(self.hparams.output_dropout),
+            ME.MinkowskiConvolution(
+                in_channels=self.hparams.first_num_filters,
+                out_channels=1,
+                kernel_size=1, stride=1, dimension=self.hparams.D, bias=True))
+
         self.timing_pred = nn.Sequential(
             ME.MinkowskiDropout(self.hparams.output_dropout),
             ME.MinkowskiConvolution(
@@ -108,18 +68,11 @@ class Generative_UResNet(pl.LightningModule):
                 out_channels=1,
                 kernel_size=1, stride=1, dimension=self.hparams.D, bias=True))
 
-    def forward(self, x):
-        x = self.input_block(x)
-        enc_feature_maps = [x]
-        for i in range(len(self.encoder)):
-            x = self.encoder[i](x)
-            if i < len(self.encoder) - 1:
-                enc_feature_maps.insert(0, x)
-        for i in range(len(self.decoder)):
-            x = self.decoder[i](x)
-            x = x + enc_feature_maps[i]    
+    def forward(self, x, batch_timing_stats, batch_counts_stats):
+        x = self.unet(x)
         prob_pred = self.probability_pred(x)
         timing_pred = self.timing_pred(x)
+        counts_pred = self.counts_pred(x)
         # if self.hparams.chain:
         timings = timing_pred.F.flatten()
         
@@ -133,19 +86,25 @@ class Generative_UResNet(pl.LightningModule):
         scores = torch.sigmoid(prob_pred.F.flatten())
         coords = prob_pred.C[scores > 0.5]
         timings = timing_pred.F.flatten()[scores > 0.5]
-        timings = (10**timings) - 1
+        # timings = torch.clamp(timings, min=0, max=4.5)
+        # timings = (10**timings) - 1
+        timings = (timings * batch_timing_stats[1]) + batch_timing_stats[0]
         new_coords = torch.hstack((coords, timings.reshape(-1, 1)))
-        new_feats = torch.ones(new_coords.shape[0])
+        # new_feats = torch.ones(new_coords.shape[0])
+        counts = counts_pred.F.flatten()[scores > 0.5]
+        # counts = torch.clamp(counts, min=0.1, max=4.5)
+        # counts = (10**counts) - 1
+        counts = (counts * batch_counts_stats[1]) + batch_counts_stats[0]
+        new_feats = torch.ceil(counts)
         new_sparse_tensor = ME.SparseTensor(new_feats.reshape(-1, 1), new_coords.int(), device=self.device,
                                             minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
-        return prob_pred, timing_pred, new_sparse_tensor
+        return prob_pred, timing_pred, counts_pred, new_sparse_tensor
         # return prob_pred, timing_pred
     
     def training_step(self, batch, batch_idx):
         coords_masked, feats_masked, coords, feats, _ = batch
-        import pdb; pdb.set_trace()
         inputs, output_geo_mask, masked_inds = ntsr_preprocess(self, coords_masked, feats_masked)
-        prob_pred, timing_pred, _ = self(inputs)
+        prob_pred, timing_pred, counts_pred, _ = self(inputs)
         cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, coords, self.geo, masked_inds, output_geo_mask)
         loss = cls_loss + timing_loss
         self.log("train_loss", loss, batch_size=self.hparams.batch_size)
@@ -192,89 +151,68 @@ def ntsr_preprocess(net, coords, feats):
                                                                 coords[:,4].reshape(-1, 1).to(net.device).float(),
                                                                 counts=feats.reshape(-1, 1).to(net.device).float(),
                                                                 prob_fill_value=0.)
-    pt_feats[:,1] = torch.log10(pt_feats[:,1] + 1)
-    output_geo_mask = extract_near_points(net.geo.to(net.device).float(), coords.float(), net.input_geo.to(net.device).float(), 100)
+    output_geo_mask = extract_near_points(net.geo.to(net.device).float(), coords.float(), net.input_geo.to(net.device).float(), 150)
     pt_coords = pt_coords[output_geo_mask]
     pt_feats = pt_feats[output_geo_mask]
+    
+    # normalize timings and counts
+    # pt_feats[:,1] = torch.log10(pt_feats[:,1] + 1)
+    # pt_feats[:,2] = torch.log10(pt_feats[:,2] + 1)
+    # batch_timing_stats = [pt_feats[:,1].mean(), pt_feats[:,1].std()]
+    # batch_counts_stats = [pt_feats[:,2].mean(), pt_feats[:,2].std()]
+    
+    batch_timing_stats = [0, pt_feats[:,1].max()]
+    batch_counts_stats = [0, pt_feats[:,2].max()]
+    pt_feats[:,1] = pt_feats[:,1] / pt_feats[:,1].max()
+    pt_feats[:,2] = pt_feats[:,2] / pt_feats[:,2].max()
+    
+    # pt_feats[:,1] = (pt_feats[:,1] - pt_feats[:,1].mean()) / pt_feats[:,1].std()
+    # pt_feats[:,2] = (pt_feats[:,2] - pt_feats[:,2].mean()) / pt_feats[:,2].std()
+    
     inputs = ME.SparseTensor(pt_feats, pt_coords.int(), device=net.device,
                             minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
-    return inputs, output_geo_mask, (pt_feats[:,0] == 0).float()
+    return inputs, output_geo_mask, (pt_feats[:,0] == 0).float(), batch_timing_stats, batch_counts_stats
 
-def uresnet_loss(prob_pred, timing_pred, unmasked_coords, geo, masked_inds, counts, output_geo_mask):
+def uresnet_loss(prob_pred, timing_pred, coords_pred, unmasked_inputs, geo, masked_inds, output_geo_mask):
+    counts, unmasked_coords = unmasked_inputs
     score_feats = prob_pred.F.flatten()
     timing_feats = timing_pred.F.flatten()
+    counts_feats = coords_pred.F.flatten()
     # scores = torch.sigmoid(score_feats)
     # counts = torch.log10(counts)
+    
+    # extract corresponding labels from the unmasked inputs
     truth_feats, _ = get_probability_and_timing_features(unmasked_coords[:,:4].to(score_feats.device).float(), 
                                                                 geo.to(score_feats.device).float(), 
                                                                 unmasked_coords[:,4].reshape(-1, 1).to(score_feats.device).float(),
-                                                                # counts=counts.reshape(-1, 1).to(score_feats.device).float(),
+                                                                counts=counts.reshape(-1, 1).to(score_feats.device).float(),
                                                                 prob_fill_value=0.)
     truth_feats = truth_feats[output_geo_mask]
+    
+    # loss for classifier
     mean_cls_loss = F.binary_cross_entropy_with_logits(score_feats, truth_feats[:,0])
+    
+    # loss for photon counts on OM, normalize labels
+    # true_counts = (truth_feats[:,2] - truth_feats[:,2].mean()) / truth_feats[:,2].std()
+    true_counts = truth_feats[:,2] / truth_feats[:,2].max()
+    # true_counts = torch.log10(truth_feats[:,2] + 1)
+    counts_loss = F.mse_loss(counts_feats, true_counts, reduction='none')
+    truth_mask = (truth_feats[:,1] > 0).float()
+    mean_counts_loss = (counts_loss * truth_mask).sum() / (truth_mask.sum() + 1e-8)
     # mean_cls_loss = F.mse_loss(score_feats, truth_feats[:,2])
     # cls_loss = F.mse_loss(torch.sigmoid(score_feats), truth_feats[:,0], reduction='none')
     # mean_cls_loss = (cls_loss * masked_inds).sum() / (masked_inds.sum() + 1e-8)
     
-    true_time = torch.log10(truth_feats[:,1] + 1)
-    timing_loss = F.smooth_l1_loss(timing_feats, true_time, reduction='none')
-    truth_mask = (truth_feats[:,1] > 0).float()
+    # loss for first timing hit on OM, normalize labels
+    # true_time = torch.log10(truth_feats[:,1] + 1)
+    # true_time = (truth_feats[:,1] - truth_feats[:,1].mean()) / truth_feats[:,1].std()
+    true_time = truth_feats[:,1] / truth_feats[:,1].max()
+    timing_loss = F.mse_loss(timing_feats, true_time, reduction='none')
+    # truth_mask = (truth_feats[:,1] > 0).float()
     mean_timing_loss = (timing_loss * truth_mask).sum() / (truth_mask.sum() + 1e-8)
+    import pdb; pdb.set_trace()
     
-    # _, counts = torch.unique(prob_pred.C[:,0], return_counts=True)
-    # cumulative_counts = counts.cumsum(dim=0)
-    # cls_losses = []
-    # timing_losses = []
-    # start = 0
-    # for end in cumulative_counts:
-    #     # only compute loss on masked coords
-    #     batch_score_feats = score_feats[start:end]
-    #     batch_timing_feats = timing_feats[start:end]
-    #     batch_truth_feats = truth_feats[start:end]
-    #     # weight_scaling_factor = batch_truth_feats[:,0].shape[0] / ((batch_truth_feats[:,0].sum() * 2) + 1e-8)
-    #     # weight = (batch_truth_feats[:,0] * (weight_scaling_factor - 1)) + 1.
-    #     cls_loss = F.binary_cross_entropy_with_logits(batch_score_feats, batch_truth_feats[:,0])
-    #     true_time = torch.log10(batch_truth_feats[:,1] + 1)
-    #     # true_time = (true_time - true_time.mean()) / (true_time.std() + 1e-8)
-    #     timing_loss = F.smooth_l1_loss(batch_timing_feats, true_time, reduction='none')
-    #     truth_mask = (batch_truth_feats[:,1] > 0).float()
-    #     timing_loss = (timing_loss * truth_mask).sum() / (truth_mask.sum() + 1e-8)
-    #     # truth_mask = (batch_truth_feats[:,1] > 0) * (weight_scaling_factor - 1)
-    #     # truth_mask = truth_mask + 1.
-    #     # timing_loss = (timing_loss * truth_mask.float()).sum() / (truth_mask.sum() + 1e-8)
-    #     cls_losses.append(cls_loss)
-    #     timing_losses.append(timing_loss)
-    #     start = end
-    # mean_cls_loss = torch.stack(cls_losses).mean()
-    # mean_timing_loss = torch.stack(timing_losses).mean()
-    return mean_cls_loss, mean_timing_loss
-
-def directional_loss(pred, gt, N=5):
-    # Sort the coordinates by time
-    pred = pred[pred[:,3].argsort()]
-    gt = gt[gt[:,3].argsort()]
-
-    # Compute the directional vectors for the predicted set
-    pred_vectors = pred.unsqueeze(1).repeat(1, pred.size(0), 1) - pred.unsqueeze(0)
-    pred_vectors = pred_vectors[pred_vectors[:,3].argsort()][:,:N]
-    pred_vectors = pred_vectors.mean(dim=1)
-
-    # Compute the directional vectors for the ground truth set
-    gt_vectors = gt.unsqueeze(1).repeat(1, gt.size(0), 1) - gt.unsqueeze(0)
-    gt_vectors = gt_vectors[gt_vectors[:,3].argsort()][:,:N]
-    gt_vectors = gt_vectors.mean(dim=1)
-
-    # Compute the nearest ground truth vector for each predicted vector
-    dists = torch.cdist(pred_vectors, gt_vectors)
-    nearest_gt_vectors = gt_vectors[dists.min(dim=1)[1]]
-
-    # Compute the cosine similarity between the predicted vectors and the nearest ground truth vectors
-    cos_sim = F.cosine_similarity(pred_vectors, nearest_gt_vectors, dim=1)
-
-    # Compute the loss as the negative mean cosine similarity
-    loss = -cos_sim.mean()
-
-    return loss
+    return mean_cls_loss, mean_counts_loss, mean_timing_loss
 
 def extract_near_points(larger_set, coords, exclusion_set, x):
     batch_size = coords[:,0].unique().shape[0]
@@ -301,20 +239,6 @@ def extract_near_points(larger_set, coords, exclusion_set, x):
         combined_mask[mask_inclusion] = True
         total_mask.append(combined_mask)
     return torch.hstack(total_mask)
-
-def rowwise_diff(tensor1, tensor2, return_mask=False):
-    t2_exp = tensor2.unsqueeze(1)
-    t1_exp = tensor1.unsqueeze(0)
-    # Compute differences
-    diff = t2_exp - t1_exp
-    mask = (diff == 0).all(-1)
-    diff_mask = ~mask.any(-1)
-    # Apply the mask to get the difference
-    if return_mask:
-        return diff_mask
-    else:
-        result = tensor2[diff_mask]
-        return result
 
 def get_probability_and_timing_features(coords, geo_coords, timings, counts=None, prob_fill_value=0.5):
     # IMPORTANT: FIRST HIT MUST BE TRUE IN CONFIG FOR THIS FUNCTION TO WORK

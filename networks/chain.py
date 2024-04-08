@@ -34,38 +34,54 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
         self.test_step_labels = []
         self.test_results = {}
         
-    def forward(self, ntsr_inputs, sscnn_inputs):
-        prob_pred, timing_pred, new_sparse_tensor = self.ntsr(ntsr_inputs)
+    def forward(self, ntsr_inputs, sscnn_inputs, batch_timing_stats, batch_counts_stats):
+        prob_pred, timing_pred, counts_pred, new_sparse_tensor = self.ntsr(ntsr_inputs, batch_timing_stats, batch_counts_stats)
         sscnn_input_tensor = ME.SparseTensor(sscnn_inputs[0].reshape(-1, 1), sscnn_inputs[1].int(), device=self.device,
                                 minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True,
                                 coordinate_manager=new_sparse_tensor.coordinate_manager)
         sscnn_input_tensor = sscnn_input_tensor + new_sparse_tensor
-        return prob_pred, timing_pred, self.sscnn(sscnn_input_tensor), sscnn_input_tensor
+        return prob_pred, timing_pred, counts_pred, self.sscnn(sscnn_input_tensor), sscnn_input_tensor
     
     def training_step(self, batch, batch_idx):
+        # get both masked and unmasked coordinates from dataloader
         coords_masked, feats_masked, coords, feats, labels = batch
-        ntsr_inputs, output_geo_mask, masked_inds = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
-        sscnn_inputs = [feats_masked, coords_masked]
-        prob_pred, timing_pred, sscnn_outputs, _ = self(ntsr_inputs, sscnn_inputs)
-        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, coords, self.ntsr.geo, masked_inds, feats, output_geo_mask)
+        # preprocess the masked coordinates and features for NTSR, prepare and extract near points to input
+        ntsr_inputs, output_geo_mask, masked_inds, batch_timing_stats, batch_counts_stats = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
+        # congregate masked and unmasked inputs
+        masked_inputs = [feats_masked, coords_masked]
+        unmasked_inputs = [feats, coords]
+        
+        prob_pred, timing_pred, counts_pred, sscnn_outputs, _ = self(ntsr_inputs, masked_inputs, batch_timing_stats, batch_counts_stats)
+        cls_loss, counts_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, counts_pred, 
+                                             unmasked_inputs, self.ntsr.geo, masked_inds, output_geo_mask)
         angular_loss = sscnn_loss(sscnn_outputs, labels, 'angular_reco')
-        loss = cls_loss + timing_loss + angular_loss
+        loss = cls_loss + counts_loss + timing_loss + angular_loss
+        
         self.log("train_loss", loss, batch_size=self.hparams.batch_size)
         self.log("cls_loss", cls_loss, batch_size=self.hparams.batch_size)
+        self.log("counts_loss", counts_loss, batch_size=self.hparams.batch_size)
         self.log("timing_loss", timing_loss, batch_size=self.hparams.batch_size)
         self.log("sscnn_loss", angular_loss, batch_size=self.hparams.batch_size)
         return loss
     
     def validation_step(self, batch, batch_idx):
+        # get both masked and unmasked coordinates from dataloader
         coords_masked, feats_masked, coords, feats, labels = batch
-        ntsr_inputs, output_geo_mask, masked_inds = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
-        sscnn_inputs = [feats_masked, coords_masked]
-        prob_pred, timing_pred, sscnn_outputs, _ = self(ntsr_inputs, sscnn_inputs)
-        cls_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, coords, self.ntsr.geo, masked_inds, feats, output_geo_mask)
+        # preprocess the masked coordinates and features for NTSR, prepare and extract near points to input
+        ntsr_inputs, output_geo_mask, masked_inds, batch_timing_stats, batch_counts_stats = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
+        # congregate masked and unmasked inputs
+        masked_inputs = [feats_masked, coords_masked]
+        unmasked_inputs = [feats, coords]
+        
+        prob_pred, timing_pred, counts_pred, sscnn_outputs, _ = self(ntsr_inputs, masked_inputs, batch_timing_stats, batch_counts_stats)
+        cls_loss, counts_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, counts_pred, 
+                                             unmasked_inputs, self.ntsr.geo, masked_inds, output_geo_mask)
         angular_loss = sscnn_loss(sscnn_outputs, labels, 'angular_reco')
-        loss = cls_loss + timing_loss + angular_loss
+        loss = cls_loss + counts_loss + timing_loss + angular_loss
+        
         self.log("val_train_loss", loss, batch_size=self.hparams.batch_size)
         self.log("val_cls_loss", cls_loss, batch_size=self.hparams.batch_size)
+        self.log("val_counts_loss", counts_loss, batch_size=self.hparams.batch_size)
         self.log("val_timing_loss", timing_loss, batch_size=self.hparams.batch_size)
         self.log("val_sscnn_loss", angular_loss, batch_size=self.hparams.batch_size)
         return loss
@@ -74,17 +90,26 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
     #     self.sscnn.on_validation_epoch_end()
         
     def test_step(self, batch, batch_idx):
+        # get both masked and unmasked coordinates from dataloader
         coords_masked, feats_masked, coords, feats, labels = batch
-        ntsr_inputs, output_geo_mask, masked_inds = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
-        sscnn_inputs = [feats_masked, coords_masked]
-        prob_pred, timing_pred, sscnn_outputs, sscnn_input_tensor = self(ntsr_inputs, sscnn_inputs)
+        # preprocess the masked coordinates and features for NTSR, prepare and extract near points to input
+        ntsr_inputs, output_geo_mask, masked_inds, batch_timing_stats, batch_counts_stats = ntsr_preprocess(self.ntsr, coords_masked, feats_masked)
+        # congregate masked and unmasked inputs
+        masked_inputs = [feats_masked, coords_masked]
+        unmasked_inputs = [feats, coords]
+        
+        prob_pred, timing_pred, counts_pred, sscnn_outputs, sscnn_input_tensor = self(ntsr_inputs, masked_inputs, batch_timing_stats, batch_counts_stats)
+        
+        
+        cls_loss, counts_loss, timing_loss = uresnet_loss(prob_pred, timing_pred, counts_pred, 
+                                            unmasked_inputs, self.ntsr.geo, masked_inds, output_geo_mask)
         
         self.test_step_outputs.append(sscnn_outputs[0].F.detach().cpu().numpy())
         self.test_step_labels.append(labels.cpu().numpy())
         
         # vis a batch of events
-        import pdb; pdb.set_trace()
         if batch_idx == 0:
+            import pdb; pdb.set_trace()
             np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_masked_events.npy", coords_masked.cpu().numpy())
             np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_unmasked_events.npy", coords.cpu().numpy())
             np.save("/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/results/" + self.logger.name + "_" + self.logger.version + "_pred_events.npy", sscnn_input_tensor.C.detach().cpu().numpy())

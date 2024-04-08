@@ -1,8 +1,10 @@
 from networks.sscnn import SSCNN
 from networks.generative_uresnet import Generative_UResNet
 from networks.ntsr import NTSR
+from networks.ntsr_cnn import NTSR_CNN
 from networks.chain import NTSR_SSCNN_Chain
 from networks.transformer import NuModel
+from networks.autoencoder import Encoder
 import lightning.pytorch as pl
 import torch.nn as nn
 
@@ -28,12 +30,30 @@ def get_network(name, cfg):
     elif name == 'ntsr':
         if cfg['checkpoint'] != '':
             print("Loading checkpoint: ", cfg['checkpoint'])
-            return Generative_UResNet.load_from_checkpoint(cfg['checkpoint'])
-        return Generative_UResNet(**cfg['ntsr_model_options'],
+            return NTSR.load_from_checkpoint(cfg['checkpoint'])
+        return NTSR(**cfg['ntsr_model_options'],
                                 batch_size=cfg['training_options']['batch_size'],
                                 lr=cfg['training_options']['lr'],
                                 lr_schedule=cfg['training_options']['lr_schedule'],
                                 weight_decay=cfg['training_options']['weight_decay'])
+    elif name == 'ntsr_cnn':
+        if cfg['checkpoint'] != '':
+            print("Loading checkpoint: ", cfg['checkpoint'])
+            return NTSR_CNN.load_from_checkpoint(cfg['checkpoint'])
+        return NTSR_CNN(**cfg['ntsr_cnn_model_options'],
+                    batch_size=cfg['training_options']['batch_size'],
+                    lr=cfg['training_options']['lr'],
+                    lr_schedule=cfg['training_options']['lr_schedule'],
+                    weight_decay=cfg['training_options']['weight_decay'])
+    elif name == 'autoencoder':
+        if cfg['checkpoint'] != '':
+            print("Loading checkpoint: ", cfg['checkpoint'])
+            return Encoder.load_from_checkpoint(cfg['checkpoint'])
+        return Encoder(**cfg['autoencoder_model_options'],
+                    batch_size=cfg['training_options']['batch_size'],
+                    lr=cfg['training_options']['lr'],
+                    lr_schedule=cfg['training_options']['lr_schedule'],
+                    weight_decay=cfg['training_options']['weight_decay'])
         # if cfg['checkpoint'] != '':
         #     print("Loading checkpoint: ", cfg['checkpoint'])
         #     return NTSR.load_from_checkpoint(cfg['checkpoint'])

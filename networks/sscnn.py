@@ -128,7 +128,7 @@ class SSCNN(pl.LightningModule):
             self.log("median_angle_diff", np.median(angle_diff), batch_size=self.hparams.batch_size, sync_dist=True)
             self.log("mean_angle_diff", angle_diff.mean(), batch_size=self.hparams.batch_size, sync_dist=True)
         elif self.hparams.mode == "energy_reco":
-            preds = np.concatenate(self.validation_step_outputs, axis=0)
+            preds = np.concatenate(self.validation_step_outputs, axis=0).flatten()
             truth = np.concatenate(self.validation_step_labels, axis=0)[:,0]
             abs_diff = np.abs(preds - truth)
             self.log("median_abs_energy_diff", np.median(abs_diff), batch_size=self.hparams.batch_size, sync_dist=True)

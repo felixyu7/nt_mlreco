@@ -41,6 +41,9 @@ if __name__=="__main__":
     elif cfg['dataloader'] == 'prometheus_transformer':
         from dataloaders.prometheus_transformer import PrometheusTransformerDataModule
         dm = PrometheusTransformerDataModule(cfg)
+    elif cfg['dataloader'] == 'prometheus_ntsr':
+        from dataloaders.prometheus_ntsr_cnn import PrometheusNTSRDataModule
+        dm = PrometheusNTSRDataModule(cfg)
     elif cfg['dataloader'] == 'icecube':
         from dataloaders.icecube import IceCubeDataModule
         dm = IceCubeDataModule(cfg)
@@ -49,14 +52,7 @@ if __name__=="__main__":
         exit()
 
     # initialize models
-    if isinstance(cfg['model'], list):
-        # chain of networks
-        chain = []
-        for name in cfg['model']:
-            chain.append(get_network(name, cfg))
-        chain = torch.nn.Sequential(*chain)
-    else:
-        net = get_network(cfg['model'], cfg)
+    net = get_network(cfg['model'], cfg)
 
     if cfg['training']:
         # initialise the wandb logger and name your wandb project
@@ -75,6 +71,8 @@ if __name__=="__main__":
                              devices=cfg['num_devices'],
                              max_epochs=cfg['training_options']['epochs'],                    
                              log_every_n_steps=1, 
+                            #  overfit_batches=10,
+                             gradient_clip_val=0.5,
                              logger=wandb_logger, 
                              callbacks=[lr_monitor, checkpoint_callback],
                              num_sanity_val_steps=0)

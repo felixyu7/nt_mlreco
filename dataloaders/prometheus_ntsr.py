@@ -3,17 +3,11 @@ import numpy as np
 import awkward as ak
 import lightning.pytorch as pl
 import MinkowskiEngine as ME
-import os, gc
-import time
-from collections import defaultdict
 import pyarrow.parquet as pq
-import polars
-from collections import OrderedDict
-from bisect import bisect_right
 import glob
 from networks.common.utils import generate_geo_mask_cuda
 
-class LazyPrometheusDataModule(pl.LightningDataModule):
+class PrometheusNTSRDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
         super().__init__()
         self.cfg = cfg
@@ -25,13 +19,13 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
     def setup(self, stage=None):
         if self.cfg['training']:
             train_files = sorted(glob.glob(self.cfg['data_options']['train_data_file'] + '*.parquet'))
-            self.train_dataset = LazySparsePrometheusDataset(train_files,
+            self.train_dataset = PrometheusNTSRDataset(train_files,
                                                              self.cfg['data_options']['scale_factor'],
                                                              self.cfg['data_options']['offset'],
                                                              self.cfg['data_options']['first_hit'])
             
         valid_files = sorted(glob.glob(self.cfg['data_options']['valid_data_file'] + '*.parquet'))
-        self.valid_dataset = LazySparsePrometheusDataset(valid_files,
+        self.valid_dataset = PrometheusNTSRDataset(valid_files,
                                                             self.cfg['data_options']['scale_factor'],
                                                             self.cfg['data_options']['offset'],
                                                             self.cfg['data_options']['first_hit'])
@@ -87,7 +81,7 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
          
-class LazySparsePrometheusDataset(torch.utils.data.Dataset):
+class PrometheusNTSRDataset(torch.utils.data.Dataset):
     
     def __init__(
         self,
@@ -122,69 +116,20 @@ class LazySparsePrometheusDataset(torch.utils.data.Dataset):
         if i < 0 or i >= self.cumulative_lengths[-1]:
             raise IndexError("Index out of range")
         file_index = np.searchsorted(self.cumulative_lengths, i+1)
-        # file_index = bisect_right(self.cumulative_lengths, i)
         true_idx = i - (self.cumulative_lengths[file_index-1] if file_index > 0 else 0)
-
-        # file = self.files[file_index]
-        # if file not in list(self.cache.keys()):
-        #     data = ak.from_parquet(file)
-        #     self.cache[file] = data
-        #     if len(self.cache) > self.cache_size:
-        #         del self.cache[list(self.cache.keys())[0]]
                 
-        # event = self.cache[file][true_idx]
         if self.current_file != self.files[file_index]:
             self.current_file = self.files[file_index]
             self.current_data = ak.from_parquet(self.files[file_index])
         
-        # data = ak.from_parquet(self.files[file_index], row_groups=true_idx)
-        # event = data[0]
         event = self.current_data[true_idx]
 
-        zenith = event.mc_truth.initial_state_zenith
-        azimuth = event.mc_truth.initial_state_azimuth
-        dir_x = np.cos(azimuth) * np.sin(zenith)
-        dir_y = np.sin(azimuth) * np.sin(zenith)
-        dir_z = np.cos(zenith)
-        
-        # [energy, dir_x, dir_y, dir_z, x, y, z]
-        label = [np.log10(event.mc_truth.initial_state_energy), 
-                 dir_x, 
-                 dir_y, 
-                 dir_z,
-                 event.mc_truth.initial_state_x, 
-                 event.mc_truth.initial_state_y, 
-                 event.mc_truth.initial_state_z]
-
-        xs = (event.photons.sensor_pos_x.to_numpy() + self.offset[0]) * self.scale_factor
-        ys = (event.photons.sensor_pos_y.to_numpy() + self.offset[1]) * self.scale_factor
-        zs = (event.photons.sensor_pos_z.to_numpy() + self.offset[2]) * self.scale_factor
-        ts = event.photons.t.to_numpy() - event.photons.t.to_numpy().min()
-
-        pos_t = np.array([
-            xs,
-            ys,
-            zs,
-            ts
-        ]).T
-
-        # only use first photon hit time per dom
-        if self.first_hit:
-            spos_t = pos_t[np.argsort(pos_t[:,-1])]
-            _, indices, feats = np.unique(spos_t[:,:3], axis=0, return_index=True, return_counts=True)
-            pos_t = spos_t[indices]
-            pos_t = np.trunc(pos_t)
-        else:
-            pos_t = np.trunc(pos_t)
-            pos_t, feats = np.unique(pos_t, return_counts=True, axis=0)
-
-        feats = feats.reshape(-1, 1).astype(np.float64)
-        
-        pos_t = torch.from_numpy(pos_t)
-        feats = torch.from_numpy(feats).view(-1, 1)
-        label = torch.from_numpy(np.array([label]))
-
-        return pos_t, feats, label
+        pos = event.pos.to_numpy()
+        feats = np.hstack([event.num_hits.to_numpy().reshape(-1, 1),
+                          event.means.to_numpy(),
+                          event.variances.to_numpy(),
+                          event.weights.to_numpy()])
+        return torch.from_numpy(pos), torch.from_numpy(feats)
 
 class ParquetFileSampler(torch.utils.data.Sampler):
     def __init__(self, data_source, parquet_file_idxs, batch_size):
@@ -224,22 +169,21 @@ class PrometheusCollator(object):
             
     def __call__(self, data_labels):
         """collate function for data input, creates batched data to be fed into network"""
-        coords, feats, labels = list(zip(*data_labels))
+        coords, feats = list(zip(*data_labels))
 
         # Create batched coordinates for the SparseTensor input
         bcoords = ME.utils.batched_coordinates(coords)
 
         # Concatenate all lists
         feats_batch = torch.from_numpy(np.concatenate(feats, 0)).float()
-        labels_batch = torch.from_numpy(np.concatenate(labels, 0)).float()
 
         if self.masking:
-            mask = generate_geo_mask_cuda(bcoords, self.input_geo, cuda=True, chunk_size=100000)
+            mask = generate_geo_mask_cuda(bcoords[:, 1:], self.input_geo, cuda=True, chunk_size=100000)
             bcoords_masked = bcoords[mask]
             feats_batch_masked = feats_batch[mask]
             if self.return_original:
-                return bcoords_masked, feats_batch_masked, bcoords, feats_batch, labels_batch
+                return bcoords_masked, feats_batch_masked, bcoords, feats_batch
             else:
-                return bcoords_masked, feats_batch_masked, labels_batch
+                return bcoords_masked, feats_batch_masked
             
-        return bcoords, feats_batch, labels_batch
+        return bcoords, feats_batch

@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+import random
 
 def LogCoshLoss(pred, truth):
     """LogCosh loss function. approximated for easier to compute gradients"""
@@ -78,6 +79,64 @@ def generate_geo_mask_cuda(coords, geo_coords, cuda=True, chunk_size=-1):
                 mask_chunk = (coords_chunk[:, :3] == geo_coords_gpu[:, None]).all(dim=2).any(dim=0)
             mask[i:end] = mask_chunk.cpu()
         return mask
+
+@torch.compile
+def tensor_row_match_mask(n_by_5_tensor, m_by_5_tensor):
+    # Expand the Nx5 tensor to Nx1x5 and the Mx5 tensor to 1xMx5
+    # This will allow us to compare each row of the first tensor against all rows of the second tensor
+    n_expanded = n_by_5_tensor.unsqueeze(1)
+    m_expanded = m_by_5_tensor.unsqueeze(0)
+    
+    # Compare the expanded tensors to get a NxMx5 tensor of True/False values
+    comparison = n_expanded == m_expanded
+    
+    # Reduce along the last dimension (5) to get a NxM tensor of True/False values
+    # A row is True only if all elements in that row are True (i.e., the row matches completely)
+    matches = comparison.all(dim=2)
+    
+    # Reduce along the M dimension to check if each row in Nx5 tensor has a match in Mx5 tensor
+    # This will result in an Nx1 tensor of True/False values
+    mask = matches.any(dim=1, keepdim=True)
+    
+    return mask
+
+@torch.compile
+def mask_out_input_strings(Nx5_tensor, Mx5_tensor):
+    # Extract the 2nd and 3rd columns from both tensors
+    Nx5_columns = Nx5_tensor[:, 1:3].unsqueeze(1)  # Add an extra dimension to Nx5 tensor for broadcasting
+    Mx5_columns = Mx5_tensor[:, 1:3].unsqueeze(0)  # Add an extra dimension to Mx5 tensor for broadcasting
+    
+    # Compare the 2nd and 3rd columns of Nx5 tensor with those of Mx5 tensor using broadcasting
+    # The result will be a tensor of shape (N, M, 2) where each element is True if the corresponding elements match
+    comparison = Nx5_columns == Mx5_columns
+    
+    # We need to check if both columns match, so we take the logical AND along the last dimension
+    # This will give us a tensor of shape (N, M) where True indicates a match for both columns
+    matches = comparison.all(dim=2)
+    
+    # Now we check if there are any matches across the M dimension for each N
+    # This will give us a tensor of shape (N,) where True indicates that there is at least one match in Mx5 tensor
+    any_matches = matches.any(dim=1)
+    
+    # The mask should be True where there are no matches, so we invert the any_matches tensor
+    mask = ~any_matches
+    
+    return mask
+
+@torch.compile
+def rowwise_diff(tensor1, tensor2, return_mask=False):
+    t2_exp = tensor2.unsqueeze(1)
+    t1_exp = tensor1.unsqueeze(0)
+    # Compute differences
+    diff = t2_exp - t1_exp
+    mask = (diff == 0).all(-1)
+    diff_mask = ~mask.any(-1)
+    # Apply the mask to get the difference
+    if return_mask:
+        return diff_mask
+    else:
+        result = tensor2[diff_mask]
+        return result
 
 def sinusoidal_embedding(n, d):
     # Returns the standard positional embedding

@@ -2,18 +2,11 @@ import torch
 import numpy as np
 import awkward as ak
 import lightning.pytorch as pl
-import MinkowskiEngine as ME
-import os, gc
-import time
-from collections import defaultdict
 import pyarrow.parquet as pq
-import polars
-from collections import OrderedDict
-from bisect import bisect_right
 import glob
 from networks.common.utils import generate_geo_mask_cuda
 
-class LazyPrometheusDataModule(pl.LightningDataModule):
+class PrometheusNTSRDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
         super().__init__()
         self.cfg = cfg
@@ -25,21 +18,18 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
     def setup(self, stage=None):
         if self.cfg['training']:
             train_files = sorted(glob.glob(self.cfg['data_options']['train_data_file'] + '*.parquet'))
-            self.train_dataset = LazySparsePrometheusDataset(train_files,
+            self.train_dataset = PrometheusNTSRDataset(train_files,
                                                              self.cfg['data_options']['scale_factor'],
                                                              self.cfg['data_options']['offset'],
                                                              self.cfg['data_options']['first_hit'])
             
         valid_files = sorted(glob.glob(self.cfg['data_options']['valid_data_file'] + '*.parquet'))
-        self.valid_dataset = LazySparsePrometheusDataset(valid_files,
+        self.valid_dataset = PrometheusNTSRDataset(valid_files,
                                                             self.cfg['data_options']['scale_factor'],
                                                             self.cfg['data_options']['offset'],
                                                             self.cfg['data_options']['first_hit'])
             
     def train_dataloader(self):
-        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
-                                        return_original=self.cfg['data_options']['return_original'],
-                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         # dataloader = torch.utils.data.DataLoader(self.train_dataset, 
         #                                     batch_size = self.cfg['training_options']['batch_size'], 
         #                                     shuffle=True,
@@ -50,7 +40,6 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             # shuffle=True,
                                             sampler=sampler,
-                                            collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
@@ -58,14 +47,10 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
     
     def val_dataloader(self):
         sampler = ParquetFileSampler(self.valid_dataset, self.valid_dataset.cumulative_lengths, self.cfg['training_options']['batch_size'])
-        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
-                                        return_original=self.cfg['data_options']['return_original'],
-                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             # shuffle=True,
                                             sampler=sampler,
-                                            collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
@@ -76,18 +61,14 @@ class LazyPrometheusDataModule(pl.LightningDataModule):
         #                                     num_workers=len(os.sched_getaffinity(0)))
 
     def test_dataloader(self):
-        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
-                                        return_original=self.cfg['data_options']['return_original'],
-                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
-                                            collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
          
-class LazySparsePrometheusDataset(torch.utils.data.Dataset):
+class PrometheusNTSRDataset(torch.utils.data.Dataset):
     
     def __init__(
         self,
@@ -112,6 +93,8 @@ class LazySparsePrometheusDataset(torch.utils.data.Dataset):
         self.current_file = ''
         self.current_data = None
         
+        self.string_mask = np.load('/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/scratch/225_to_64_string_mask.npy')
+        
         # self.cache = OrderedDict()
         # self.cache_size = 20
 
@@ -122,69 +105,36 @@ class LazySparsePrometheusDataset(torch.utils.data.Dataset):
         if i < 0 or i >= self.cumulative_lengths[-1]:
             raise IndexError("Index out of range")
         file_index = np.searchsorted(self.cumulative_lengths, i+1)
-        # file_index = bisect_right(self.cumulative_lengths, i)
         true_idx = i - (self.cumulative_lengths[file_index-1] if file_index > 0 else 0)
-
-        # file = self.files[file_index]
-        # if file not in list(self.cache.keys()):
-        #     data = ak.from_parquet(file)
-        #     self.cache[file] = data
-        #     if len(self.cache) > self.cache_size:
-        #         del self.cache[list(self.cache.keys())[0]]
                 
-        # event = self.cache[file][true_idx]
         if self.current_file != self.files[file_index]:
             self.current_file = self.files[file_index]
             self.current_data = ak.from_parquet(self.files[file_index])
         
-        # data = ak.from_parquet(self.files[file_index], row_groups=true_idx)
-        # event = data[0]
         event = self.current_data[true_idx]
 
-        zenith = event.mc_truth.initial_state_zenith
-        azimuth = event.mc_truth.initial_state_azimuth
-        dir_x = np.cos(azimuth) * np.sin(zenith)
-        dir_y = np.sin(azimuth) * np.sin(zenith)
-        dir_z = np.cos(zenith)
+        string_id = event.photons.string_id.to_numpy()
+        sensor_id = event.photons.sensor_id.to_numpy()
+        pos = np.vstack([string_id, sensor_id]).T
         
-        # [energy, dir_x, dir_y, dir_z, x, y, z]
-        label = [np.log10(event.mc_truth.initial_state_energy), 
-                 dir_x, 
-                 dir_y, 
-                 dir_z,
-                 event.mc_truth.initial_state_x, 
-                 event.mc_truth.initial_state_y, 
-                 event.mc_truth.initial_state_z]
-
-        xs = (event.photons.sensor_pos_x.to_numpy() + self.offset[0]) * self.scale_factor
-        ys = (event.photons.sensor_pos_y.to_numpy() + self.offset[1]) * self.scale_factor
-        zs = (event.photons.sensor_pos_z.to_numpy() + self.offset[2]) * self.scale_factor
-        ts = event.photons.t.to_numpy() - event.photons.t.to_numpy().min()
-
-        pos_t = np.array([
-            xs,
-            ys,
-            zs,
-            ts
-        ]).T
-
-        # only use first photon hit time per dom
-        if self.first_hit:
-            spos_t = pos_t[np.argsort(pos_t[:,-1])]
-            _, indices, feats = np.unique(spos_t[:,:3], axis=0, return_index=True, return_counts=True)
-            pos_t = spos_t[indices]
-            pos_t = np.trunc(pos_t)
-        else:
-            pos_t = np.trunc(pos_t)
-            pos_t, feats = np.unique(pos_t, return_counts=True, axis=0)
-
-        feats = feats.reshape(-1, 1).astype(np.float64)
+        sensor_pos = np.vstack([event.photons.sensor_pos_x.to_numpy(),
+                                event.photons.sensor_pos_y.to_numpy(),
+                                event.photons.sensor_pos_z.to_numpy()]).T
         
-        pos_t = torch.from_numpy(pos_t)
-        feats = torch.from_numpy(feats).view(-1, 1)
-        label = torch.from_numpy(np.array([label]))
-
-        return pos_t, feats, label
+        # get unique pos row-wise, and count number of times they appear in pos
+        unique_pos, inds, counts = np.unique(pos, axis=0, return_index=True, return_counts=True)
+        unique_sensor_pos = sensor_pos[inds]
+        
+        feats = np.hstack([unique_sensor_pos / 100., counts.reshape(-1, 1)])
+        
+        # efficiently project positions onto image of size 225x61, with counts as pixel values
+        image = np.zeros((225, 61, feats.shape[1]))
+        image[unique_pos[:, 0], unique_pos[:, 1]] = feats
+        
+        # mask out on first (string) dimension with string mask
+        masked_image = image * np.expand_dims(self.string_mask, (1, 2))
+        
+        return torch.from_numpy(masked_image), torch.from_numpy(image)
 
 class ParquetFileSampler(torch.utils.data.Sampler):
     def __init__(self, data_source, parquet_file_idxs, batch_size):
@@ -212,34 +162,3 @@ class ParquetFileSampler(torch.utils.data.Sampler):
 
     def __len__(self):
        return len(self.data_source)
-
-class PrometheusCollator(object):
-    
-    def __init__(self, masking=False, return_original=False, input_geo_file=''):
-        self.masking = masking
-        self.return_original = return_original
-        self.input_geo_file = input_geo_file
-        if self.input_geo_file != '':
-            self.input_geo = torch.from_numpy(np.load(self.input_geo_file))
-            
-    def __call__(self, data_labels):
-        """collate function for data input, creates batched data to be fed into network"""
-        coords, feats, labels = list(zip(*data_labels))
-
-        # Create batched coordinates for the SparseTensor input
-        bcoords = ME.utils.batched_coordinates(coords)
-
-        # Concatenate all lists
-        feats_batch = torch.from_numpy(np.concatenate(feats, 0)).float()
-        labels_batch = torch.from_numpy(np.concatenate(labels, 0)).float()
-
-        if self.masking:
-            mask = generate_geo_mask_cuda(bcoords, self.input_geo, cuda=True, chunk_size=100000)
-            bcoords_masked = bcoords[mask]
-            feats_batch_masked = feats_batch[mask]
-            if self.return_original:
-                return bcoords_masked, feats_batch_masked, bcoords, feats_batch, labels_batch
-            else:
-                return bcoords_masked, feats_batch_masked, labels_batch
-            
-        return bcoords, feats_batch, labels_batch
