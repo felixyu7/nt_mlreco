@@ -56,7 +56,7 @@ class SSCNN(pl.LightningModule):
                 out_channels=self.hparams.first_num_filters,
                 kernel_size=3, stride=3, dimension=self.hparams.D, dilation=1,
                 bias=False),
-                ME.MinkowskiMaxPooling(kernel_size=8, stride=8, dimension=4),
+                ME.MinkowskiMaxPooling(kernel_size=8, stride=8, dimension=self.hparams.D),
                 ME.MinkowskiPReLU(),
                 ME.MinkowskiDropout(self.hparams.input_dropout))
 
@@ -64,7 +64,7 @@ class SSCNN(pl.LightningModule):
         for i, planes in enumerate(self.nPlanes):
             m = []
             for _ in range(self.hparams.reps):
-                m.append(ResNetBlock(planes, planes, dropout=self.hparams.dropout))
+                m.append(ResNetBlock(planes, planes, dimension=self.hparams.D, dropout=self.hparams.dropout))
             m = nn.Sequential(*m)
             self.resnet.append(m)
             m = []
@@ -100,7 +100,7 @@ class SSCNN(pl.LightningModule):
         
     def training_step(self, batch, batch_idx):
         coords, feats, labels = batch
-        inputs = ME.SparseTensor(feats.float().reshape(coords.shape[0], -1), coords, device=self.device,
+        inputs = ME.SparseTensor(feats.float().reshape(coords.shape[0], -1), coords.int(), device=self.device,
                                 minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
         outputs = self(inputs)
         loss = sscnn_loss(outputs, labels, self.hparams.mode)
@@ -109,7 +109,7 @@ class SSCNN(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         coords, feats, labels = batch
-        inputs = ME.SparseTensor(feats.float().reshape(coords.shape[0], -1), coords, device=self.device,
+        inputs = ME.SparseTensor(feats.float().reshape(coords.shape[0], -1), coords.int(), device=self.device,
                                 minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
         outputs = self(inputs)
         loss = sscnn_loss(outputs, labels, self.hparams.mode)
@@ -152,7 +152,7 @@ class SSCNN(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         coords, feats, labels = batch
-        inputs = ME.SparseTensor(feats.float().reshape(coords.shape[0], -1), coords, device=self.device,
+        inputs = ME.SparseTensor(feats.float().reshape(coords.shape[0], -1), coords.int(), device=self.device,
                                 minkowski_algorithm=ME.MinkowskiAlgorithm.SPEED_OPTIMIZED, requires_grad=True)
         outputs = self(inputs)
         self.test_step_outputs.append(outputs[0].F.detach().cpu().numpy())

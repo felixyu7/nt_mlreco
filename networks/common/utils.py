@@ -57,10 +57,10 @@ def generate_geo_mask(coords, geo_coords):
         mask = (coords[:, :3] == geo_coords[:, None]).all(dim=2).any(dim=0)
     return mask
 
-def generate_geo_mask_cuda(coords, geo_coords, cuda=True, chunk_size=-1):
+def generate_geo_mask_cuda(coords, geo_coords, cuda=True, chunk_size=-1, mode='batch'):
     if not cuda:
         geo_coords = geo_coords.to(coords.device)
-        if coords.shape[1] == 5:
+        if mode == 'batch':
             mask = (coords[:, 1:4] == geo_coords[:, None]).all(dim=2).any(dim=0)
         else:
             mask = (coords[:, :3] == geo_coords[:, None]).all(dim=2).any(dim=0)
@@ -73,7 +73,7 @@ def generate_geo_mask_cuda(coords, geo_coords, cuda=True, chunk_size=-1):
         for i in range(0, coords.shape[0], chunk_size):
             end = min(i+chunk_size, coords.shape[0])
             coords_chunk = coords[i:end].cuda()
-            if coords.shape[1] == 5:
+            if mode == 'batch':
                 mask_chunk = (coords_chunk[:, 1:4] == geo_coords_gpu[:, None]).all(dim=2).any(dim=0)
             else:
                 mask_chunk = (coords_chunk[:, :3] == geo_coords_gpu[:, None]).all(dim=2).any(dim=0)

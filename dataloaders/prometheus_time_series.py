@@ -4,9 +4,8 @@ import awkward as ak
 import lightning.pytorch as pl
 import pyarrow.parquet as pq
 import glob
-from collections import defaultdict
 
-class PrometheusNTSRDataModule(pl.LightningDataModule):
+class PrometheusTimeSeriesDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
         super().__init__()
         self.cfg = cfg
@@ -18,75 +17,56 @@ class PrometheusNTSRDataModule(pl.LightningDataModule):
     def setup(self, stage=None):
         if self.cfg['training']:
             train_files = sorted(glob.glob(self.cfg['data_options']['train_data_file'] + '*.parquet'))
-            self.train_dataset = PrometheusNTSRDataset(train_files,
+            self.train_dataset = PrometheusTimeSeriesDataset(train_files,
                                                              self.cfg['data_options']['scale_factor'],
                                                              self.cfg['data_options']['offset'],
-                                                             self.cfg['data_options']['first_hit'],
-                                                             self.cfg['data_options']['labels'])
+                                                             self.cfg['data_options']['first_hit'])
             
         valid_files = sorted(glob.glob(self.cfg['data_options']['valid_data_file'] + '*.parquet'))
-        self.valid_dataset = PrometheusNTSRDataset(valid_files,
+        self.valid_dataset = PrometheusTimeSeriesDataset(valid_files,
                                                             self.cfg['data_options']['scale_factor'],
                                                             self.cfg['data_options']['offset'],
-                                                            self.cfg['data_options']['first_hit'],
-                                                            self.cfg['data_options']['labels'])
+                                                            self.cfg['data_options']['first_hit'])
             
     def train_dataloader(self):
-        collate_fn = PrometheusNTSRCollator()
         sampler = ParquetFileSampler(self.train_dataset, self.train_dataset.cumulative_lengths, self.cfg['training_options']['batch_size'])
         dataloader = torch.utils.data.DataLoader(self.train_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             # shuffle=True,
                                             sampler=sampler,
-                                            # collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
         return dataloader
     
     def val_dataloader(self):
-        collate_fn = PrometheusNTSRCollator()
         sampler = ParquetFileSampler(self.valid_dataset, self.valid_dataset.cumulative_lengths, self.cfg['training_options']['batch_size'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             # shuffle=True,
                                             sampler=sampler,
-                                            # collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
-        # return torch.utils.data.DataLoader(self.valid_dataset, 
-        #                                     batch_size = self.cfg['training_options']['batch_size'], 
-        #                                     shuffle=False,
-        #                                     collate_fn=prometheus_collate_fn,
-        #                                     num_workers=len(os.sched_getaffinity(0)))
 
     def test_dataloader(self):
-        collate_fn = PrometheusNTSRCollator()
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
-                                            # collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
          
-class PrometheusNTSRDataset(torch.utils.data.Dataset):
+class PrometheusTimeSeriesDataset(torch.utils.data.Dataset):
     
     def __init__(
         self,
         files,
         scale_factor,
         offset,
-        first_hit,
-        labels):
+        first_hit):
 
         self.files = files
-        self.scale_factor = scale_factor
-        self.offset = offset
-        self.first_hit = first_hit
-        self.labels = labels
-        
         num_events = []
         for file in self.files:
             data = pq.ParquetFile(file)
@@ -97,11 +77,6 @@ class PrometheusNTSRDataset(torch.utils.data.Dataset):
         
         self.current_file = ''
         self.current_data = None
-        
-        self.string_mask = np.load('/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/scratch/225_to_64_string_mask.npy')
-        
-        # self.cache = OrderedDict()
-        # self.cache_size = 20
 
     def __len__(self):
         return self.dataset_size
@@ -115,48 +90,11 @@ class PrometheusNTSRDataset(torch.utils.data.Dataset):
         if self.current_file != self.files[file_index]:
             self.current_file = self.files[file_index]
             self.current_data = ak.from_parquet(self.files[file_index])
-        
-        event = self.current_data[true_idx]
-        
-        # latents
-        unique_pos = event.latents.string_sensor_pos.to_numpy().astype(np.int32)
-        unique_sensor_pos = event.latents.pos.to_numpy()
-        counts = event.latents.num_hits.to_numpy()
-        latents = event.latents.latents.to_numpy()
-        
-        # scale normalize positions
-        unique_sensor_pos = (unique_sensor_pos / 100.).astype(np.float32)
-        # log normalize counts
-        counts = np.log(counts + 1).astype(np.float32)
-        
-        feats = np.hstack([unique_sensor_pos, counts.reshape(-1, 1), latents])
-        
-        # efficiently project positions onto image of size 225x61, with counts as pixel values
-        image = np.zeros((225, 61, feats.shape[1]), dtype=np.float32)
-        image[unique_pos[:, 0], unique_pos[:, 1]] = feats
-        
-        # mask out on first (string) dimension with string mask
-        masked_image = image * np.expand_dims(self.string_mask, (1, 2)).astype(np.float32)
-        
-        if self.labels:
-            zenith = event.mc_truth.initial_state_zenith
-            azimuth = event.mc_truth.initial_state_azimuth
-            dir_x = np.cos(azimuth) * np.sin(zenith)
-            dir_y = np.sin(azimuth) * np.sin(zenith)
-            dir_z = np.cos(zenith)
             
-            # [energy, dir_x, dir_y, dir_z, x, y, z]
-            label = [np.log10(event.mc_truth.initial_state_energy), 
-                    dir_x, 
-                    dir_y, 
-                    dir_z,
-                    event.mc_truth.initial_state_x, 
-                    event.mc_truth.initial_state_y, 
-                    event.mc_truth.initial_state_z]
-            return torch.from_numpy(masked_image), torch.from_numpy(image), torch.from_numpy(np.array([label]))
+        event = self.current_data[true_idx].to_numpy()
+        event = np.log(event + 1)
         
-        return torch.from_numpy(masked_image), torch.from_numpy(image)
-        # return torch.from_numpy(masked_image), torch.from_numpy(image), torch.from_numpy(full_time_series_image)
+        return torch.from_numpy(event).float()
 
 class ParquetFileSampler(torch.utils.data.Sampler):
     def __init__(self, data_source, parquet_file_idxs, batch_size):
@@ -185,7 +123,7 @@ class ParquetFileSampler(torch.utils.data.Sampler):
     def __len__(self):
        return len(self.data_source)
    
-class PrometheusNTSRCollator(object):
+class PrometheusTimeSeriesCollator(object):
     
     def __init__(self):
         pass

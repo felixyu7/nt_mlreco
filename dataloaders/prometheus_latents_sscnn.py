@@ -6,7 +6,10 @@ import pyarrow.parquet as pq
 import glob
 from collections import defaultdict
 
-class PrometheusNTSRDataModule(pl.LightningDataModule):
+import MinkowskiEngine as ME
+from networks.common.utils import generate_geo_mask_cuda
+
+class PrometheusLatentsSSCNNDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
         super().__init__()
         self.cfg = cfg
@@ -18,40 +21,42 @@ class PrometheusNTSRDataModule(pl.LightningDataModule):
     def setup(self, stage=None):
         if self.cfg['training']:
             train_files = sorted(glob.glob(self.cfg['data_options']['train_data_file'] + '*.parquet'))
-            self.train_dataset = PrometheusNTSRDataset(train_files,
+            self.train_dataset = PrometheusLatentsSSCNNDataset(train_files,
                                                              self.cfg['data_options']['scale_factor'],
                                                              self.cfg['data_options']['offset'],
-                                                             self.cfg['data_options']['first_hit'],
-                                                             self.cfg['data_options']['labels'])
+                                                             self.cfg['data_options']['first_hit'])
             
         valid_files = sorted(glob.glob(self.cfg['data_options']['valid_data_file'] + '*.parquet'))
-        self.valid_dataset = PrometheusNTSRDataset(valid_files,
+        self.valid_dataset = PrometheusLatentsSSCNNDataset(valid_files,
                                                             self.cfg['data_options']['scale_factor'],
                                                             self.cfg['data_options']['offset'],
-                                                            self.cfg['data_options']['first_hit'],
-                                                            self.cfg['data_options']['labels'])
+                                                            self.cfg['data_options']['first_hit'])
             
     def train_dataloader(self):
-        collate_fn = PrometheusNTSRCollator()
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
+                                        return_original=self.cfg['data_options']['return_original'],
+                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         sampler = ParquetFileSampler(self.train_dataset, self.train_dataset.cumulative_lengths, self.cfg['training_options']['batch_size'])
         dataloader = torch.utils.data.DataLoader(self.train_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             # shuffle=True,
                                             sampler=sampler,
-                                            # collate_fn=collate_fn,
+                                            collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
         return dataloader
     
     def val_dataloader(self):
-        collate_fn = PrometheusNTSRCollator()
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
+                                        return_original=self.cfg['data_options']['return_original'],
+                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         sampler = ParquetFileSampler(self.valid_dataset, self.valid_dataset.cumulative_lengths, self.cfg['training_options']['batch_size'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             # shuffle=True,
                                             sampler=sampler,
-                                            # collate_fn=collate_fn,
+                                            collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
@@ -62,30 +67,30 @@ class PrometheusNTSRDataModule(pl.LightningDataModule):
         #                                     num_workers=len(os.sched_getaffinity(0)))
 
     def test_dataloader(self):
-        collate_fn = PrometheusNTSRCollator()
+        collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
+                                        return_original=self.cfg['data_options']['return_original'],
+                                        input_geo_file=self.cfg['data_options']['input_geo_file'])
         return torch.utils.data.DataLoader(self.valid_dataset, 
                                             batch_size = self.cfg['training_options']['batch_size'], 
                                             shuffle=False,
-                                            # collate_fn=collate_fn,
+                                            collate_fn=collate_fn,
                                             pin_memory=True,
                                             persistent_workers=True,
                                             num_workers=self.cfg['training_options']['num_workers'])
          
-class PrometheusNTSRDataset(torch.utils.data.Dataset):
+class PrometheusLatentsSSCNNDataset(torch.utils.data.Dataset):
     
     def __init__(
         self,
         files,
         scale_factor,
         offset,
-        first_hit,
-        labels):
+        first_hit):
 
         self.files = files
         self.scale_factor = scale_factor
         self.offset = offset
         self.first_hit = first_hit
-        self.labels = labels
         
         num_events = []
         for file in self.files:
@@ -118,45 +123,31 @@ class PrometheusNTSRDataset(torch.utils.data.Dataset):
         
         event = self.current_data[true_idx]
         
+        zenith = event.mc_truth.initial_state_zenith
+        azimuth = event.mc_truth.initial_state_azimuth
+        dir_x = np.cos(azimuth) * np.sin(zenith)
+        dir_y = np.sin(azimuth) * np.sin(zenith)
+        dir_z = np.cos(zenith)
+        
+        # [energy, dir_x, dir_y, dir_z, x, y, z]
+        label = [np.log10(event.mc_truth.initial_state_energy), 
+                 dir_x, 
+                 dir_y, 
+                 dir_z,
+                 event.mc_truth.initial_state_x, 
+                 event.mc_truth.initial_state_y, 
+                 event.mc_truth.initial_state_z]
+        
         # latents
         unique_pos = event.latents.string_sensor_pos.to_numpy().astype(np.int32)
         unique_sensor_pos = event.latents.pos.to_numpy()
         counts = event.latents.num_hits.to_numpy()
+        counts = np.log(counts + 1)
         latents = event.latents.latents.to_numpy()
         
-        # scale normalize positions
-        unique_sensor_pos = (unique_sensor_pos / 100.).astype(np.float32)
-        # log normalize counts
-        counts = np.log(counts + 1).astype(np.float32)
+        feats = np.hstack([counts.reshape(-1, 1), latents])
         
-        feats = np.hstack([unique_sensor_pos, counts.reshape(-1, 1), latents])
-        
-        # efficiently project positions onto image of size 225x61, with counts as pixel values
-        image = np.zeros((225, 61, feats.shape[1]), dtype=np.float32)
-        image[unique_pos[:, 0], unique_pos[:, 1]] = feats
-        
-        # mask out on first (string) dimension with string mask
-        masked_image = image * np.expand_dims(self.string_mask, (1, 2)).astype(np.float32)
-        
-        if self.labels:
-            zenith = event.mc_truth.initial_state_zenith
-            azimuth = event.mc_truth.initial_state_azimuth
-            dir_x = np.cos(azimuth) * np.sin(zenith)
-            dir_y = np.sin(azimuth) * np.sin(zenith)
-            dir_z = np.cos(zenith)
-            
-            # [energy, dir_x, dir_y, dir_z, x, y, z]
-            label = [np.log10(event.mc_truth.initial_state_energy), 
-                    dir_x, 
-                    dir_y, 
-                    dir_z,
-                    event.mc_truth.initial_state_x, 
-                    event.mc_truth.initial_state_y, 
-                    event.mc_truth.initial_state_z]
-            return torch.from_numpy(masked_image), torch.from_numpy(image), torch.from_numpy(np.array([label]))
-        
-        return torch.from_numpy(masked_image), torch.from_numpy(image)
-        # return torch.from_numpy(masked_image), torch.from_numpy(image), torch.from_numpy(full_time_series_image)
+        return torch.from_numpy(unique_sensor_pos), torch.from_numpy(feats), torch.from_numpy(np.array([label]))
 
 class ParquetFileSampler(torch.utils.data.Sampler):
     def __init__(self, data_source, parquet_file_idxs, batch_size):
@@ -185,40 +176,33 @@ class ParquetFileSampler(torch.utils.data.Sampler):
     def __len__(self):
        return len(self.data_source)
    
-class PrometheusNTSRCollator(object):
+class PrometheusCollator(object):
     
-    def __init__(self):
-        pass
+    def __init__(self, masking=False, return_original=False, input_geo_file=''):
+        self.masking = masking
+        self.return_original = return_original
+        self.input_geo_file = input_geo_file
+        if self.input_geo_file != '':
+            self.input_geo = torch.from_numpy(np.load(self.input_geo_file))
             
     def __call__(self, data_labels):
         """collate function for data input, creates batched data to be fed into network"""
-        masked_image, image, true_photons = list(zip(*data_labels))
+        coords, feats, labels = list(zip(*data_labels))
 
-        # concatenate masked_image and image along batch dimension
-        masked_image_batch = torch.stack(masked_image)
-        image_batch = torch.stack(image)
-        
-        true_photons_batch = batched_coords(true_photons)
+        # Create batched coordinates for the SparseTensor input
+        bcoords = ME.utils.batched_coordinates(coords)
+
+        # Concatenate all lists
+        feats_batch = torch.from_numpy(np.concatenate(feats, 0)).float()
+        labels_batch = torch.from_numpy(np.concatenate(labels, 0)).float()
+
+        if self.masking:
+            mask = generate_geo_mask_cuda(bcoords, self.input_geo, cuda=True, chunk_size=100000)
+            bcoords_masked = bcoords[mask]
+            feats_batch_masked = feats_batch[mask]
+            if self.return_original:
+                return bcoords_masked, feats_batch_masked, bcoords, feats_batch, labels_batch
+            else:
+                return bcoords_masked, feats_batch_masked, labels_batch
             
-        return masked_image_batch, image_batch, true_photons_batch
-
-@torch.compile
-def batched_coords(coords_list):
-    # Initialize a list to hold the tensors with their batch indices
-    combined_list = []
-    
-    # Iterate through the list of tensors with the enumeration to get the batch index
-    for idx, coords in enumerate(coords_list):
-        # Generate a tensor of batch indices for the current tensor
-        batch_indices = torch.full((coords.size(0), 1), idx, dtype=coords.dtype)
-        
-        # Concatenate the batch index tensor with the original tensor along the columns
-        combined_tensor = torch.cat([batch_indices, coords], dim=1)
-        
-        # Append the combined tensor to the list
-        combined_list.append(combined_tensor)
-    
-    # Concatenate all tensors in the list vertically to form a large 2D tensor
-    final_coords = torch.cat(combined_list, dim=0)
-    
-    return final_coords
+        return bcoords, feats_batch, labels_batch
