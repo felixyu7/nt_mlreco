@@ -35,7 +35,7 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
                                 weight_decay=weight_decay)
         
         self.mode = sscnn_cfg['mode']
-        ntsr_checkpoint = torch.load('/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/ckpts/ntsr_poisson_latents_epoch29.ckpt')
+        ntsr_checkpoint = torch.load('/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/ckpts/ntsr_mse_only_latents_epoch29.ckpt')
         self.ntsr_cnn.load_state_dict(ntsr_checkpoint['state_dict'])
         self.ntsr_cnn.eval()
         # freeze weights in ntsr_cnn
@@ -60,10 +60,14 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
         # inputs_mask = (img[:, 3, :-31, :-3] > 0) # input pixels
         # scores_mask = (torch.sigmoid(upscaled_img[:, 0, :, :]) > 0.5) # high scoring pixels from NTSR
         # mask = inputs_mask | scores_mask
+        # mask = (torch.round(torch.exp(upscaled_img[:, 0, :, :])) - 1) >= 1
         
-        mask = (torch.round(torch.exp(upscaled_img[:, 0, :, :])) - 1) >= 1
+        counts = torch.poisson(torch.exp(F.relu(upscaled_img[:, 0, :, :])) - 1)
+        img = img[:, :, :-31, :-3]
+        counts = (counts * (~(img[:, 3, :, :] > 0))) + (torch.exp(img[:, 3, :, :]) - 1) # use input pixel counts if they exist
+        mask = (counts >= 1)
         
-        coords, feats = convert_img_to_sscnn_input(upscaled_img, mask)
+        coords, feats = convert_img_to_sscnn_input(upscaled_img, mask, counts)
         real_coords = extract_real_coords(coords[:, 1:].to(self.device), self.geo.int().to(self.device)) # convert from string sensor coords to real coords
         coords = torch.cat((coords[:, 0].unsqueeze(1), real_coords), dim=1)
         
@@ -187,7 +191,7 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
         return [optimizer], [scheduler]
 
 @torch.compile
-def convert_img_to_sscnn_input(images, mask):    
+def convert_img_to_sscnn_input(images, mask, counts):
     # Get the indices of nonzero elements in the mask
     nonzero_indices = mask.nonzero(as_tuple=False)
     
@@ -201,6 +205,10 @@ def convert_img_to_sscnn_input(images, mask):
     
     # Get the features corresponding to the nonzero mask locations
     features = images[batch_indices, :, height_indices, width_indices]
+    counts = counts[batch_indices, height_indices, width_indices]
+    
+    # replace first feature with counts
+    features[:, 0] = torch.log(counts + 1)
     
     return coords, features
 

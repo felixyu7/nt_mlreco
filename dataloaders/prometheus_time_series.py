@@ -91,10 +91,18 @@ class PrometheusTimeSeriesDataset(torch.utils.data.Dataset):
             self.current_file = self.files[file_index]
             self.current_data = ak.from_parquet(self.files[file_index])
             
-        event = self.current_data[true_idx].to_numpy()
-        event = np.log(event + 1)
+        # event = self.current_data[true_idx].to_numpy()
+        # event = np.log(event + 1)
         
-        return torch.from_numpy(event).float()
+        # return torch.from_numpy(event).float()
+        
+        event = self.current_data[true_idx]
+        binned_time_series = event['binned_time_counts'].to_numpy()
+        binned_time_series = np.log(binned_time_series + 1)
+        # first_hit_time = event['first_hit_time']
+        # first_hit_time = np.log(first_hit_time + 1)
+        
+        return torch.from_numpy(binned_time_series).float()
 
 class ParquetFileSampler(torch.utils.data.Sampler):
     def __init__(self, data_source, parquet_file_idxs, batch_size):

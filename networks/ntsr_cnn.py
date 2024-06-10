@@ -115,30 +115,14 @@ class NTSR_CNN(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, self.hparams.lr_schedule, gamma=0.1)
         return [optimizer], [scheduler]
 
-def ntsr_loss(outputs, imgs):
-    # counts_label = imgs[:, 3, :, :]
-    # true_counts = torch.exp(counts_label) - 1
-    # cls_label = (counts_label > 0).float()
-    # weighting_factor = 1 / (cls_label.sum() / cls_label.flatten().shape[0])
-    # weights = (cls_label * (weighting_factor - 1)) + 1
-    # cls_loss = F.binary_cross_entropy_with_logits(outputs[:, 0, :, :], cls_label, weight=weights)
-
-    # counts_loss = F.mse_loss(outputs[:, 1, :, :], counts_label, reduction='none')
-    # counts_loss = (counts_loss * true_counts).sum() / true_counts.sum()
-    # counts_loss = counts_loss + cls_loss
-    
-    counts_label = imgs[:, 3, :, :]
+def ntsr_loss(outputs, labels):
+    counts_label = labels[:, 3, :, :]
     cls_label = (counts_label > 0).float()
-    # cls_loss = F.binary_cross_entropy_with_logits(outputs[:, 0, :, :], cls_label)
-    # counts_loss = F.mse_loss(outputs[:, 1, :, :], counts_label, reduction='none')
-    # counts_loss = (counts_loss * cls_label.unsqueeze(1)).sum() / cls_label.sum()
-    # counts_loss = counts_loss + cls_loss
-    # counts_loss = F.mse_loss(F.relu(outputs[:, 0, :, :]), counts_label)
-    counts_loss = F.poisson_nll_loss(F.relu(outputs[:, 0, :, :]), counts_label, log_input=False, full=False)
+    counts_loss = F.mse_loss(F.relu(outputs[:, 0, :, :]), counts_label)
     
-    # time_pdf_loss = F.mse_loss(outputs[:, 2:, :, :], imgs[:, 4:, :, :], reduction='none')
-    time_pdf_loss = F.mse_loss(outputs[:, 1:, :, :], imgs[:, 4:, :, :], reduction='none')
-    time_pdf_loss = (time_pdf_loss * cls_label.unsqueeze(1)).sum() / (cls_label.sum() * 64)
+    time_pdf_loss = F.mse_loss(outputs[:, 1:, :, :], labels[:, 4:, :, :], reduction='none')
+    time_pdf_loss = (time_pdf_loss * cls_label.unsqueeze(1)).sum() / cls_label.sum()
+    time_pdf_loss = time_pdf_loss / outputs.shape[0]
     
     return counts_loss, time_pdf_loss
   
