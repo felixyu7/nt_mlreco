@@ -124,12 +124,15 @@ class PrometheusNTSRDataset(torch.utils.data.Dataset):
         counts = event.latents.num_hits.to_numpy()
         latents = event.latents.latents.to_numpy()
         
+        first_time_hit = event.latents.first_time_hit.to_numpy()
+        
         # scale normalize positions
         unique_sensor_pos = (unique_sensor_pos / 100.).astype(np.float32)
         # log normalize counts
         counts = np.log(counts + 1).astype(np.float32)
+        first_time_hit = np.log(first_time_hit + 1).astype(np.float32)
         
-        feats = np.hstack([unique_sensor_pos, counts.reshape(-1, 1), latents])
+        feats = np.hstack([unique_sensor_pos, counts.reshape(-1, 1), first_time_hit.reshape(-1, 1), latents])
         
         # efficiently project positions onto image of size 225x61, with counts as pixel values
         image = np.zeros((225, 61, feats.shape[1]), dtype=np.float32)

@@ -35,7 +35,7 @@ class NTSR_SSCNN_Chain(pl.LightningModule):
                                 weight_decay=weight_decay)
         
         self.mode = sscnn_cfg['mode']
-        ntsr_checkpoint = torch.load('/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/ckpts/ntsr_mse_only_latents_epoch29.ckpt')
+        ntsr_checkpoint = torch.load('/n/holylfs05/LABS/arguelles_delgado_lab/Users/felixyu/nt_mlreco/ckpts/ntsr_latents_vae_v3_epoch4.ckpt')
         self.ntsr_cnn.load_state_dict(ntsr_checkpoint['state_dict'])
         self.ntsr_cnn.eval()
         # freeze weights in ntsr_cnn
