@@ -109,23 +109,6 @@ class PrometheusLatentsSSCNNDataset(torch.utils.data.Dataset):
         
         # self.cache = OrderedDict()
         # self.cache_size = 20
-        
-        geo_x = np.linspace(-420, 420, 15)
-        geo_y = np.linspace(-420, 420, 15)
-        geo_z = np.linspace(-(60*15)/2, (60*15)/2, 61)
-        # Create the meshgrid for all combinations
-        X, Y, Z = np.meshgrid(geo_x, geo_y, geo_z, indexing='ij')
-        # Flatten the meshgrid arrays and stack them as columns
-        coordinates = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
-        sparse_geo_x = np.linspace(-420, 420, 8)
-        sparse_geo_y = np.linspace(-420, 420, 8)
-        # Create the meshgrid for all combinations
-        X, Y, Z = np.meshgrid(sparse_geo_x, sparse_geo_y, geo_z, indexing='ij')
-        # Flatten the meshgrid arrays and stack them as columns
-        sparse_coordinates = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
-        real_sensors = sparse_coordinates
-        mask = np.array([row in sparse_coordinates.tolist() for row in coordinates.tolist()])
-        self.virtual_sensors = coordinates[~mask]
 
     def __len__(self):
         return self.dataset_size
