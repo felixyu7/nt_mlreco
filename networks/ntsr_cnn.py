@@ -31,8 +31,6 @@ class NTSR_CNN(pl.LightningModule):
                                         encoder_weights=None,
                                         in_channels=self.hparams.first_num_filters, 
                                         classes=self.hparams.output_classes)
-        
-        self.iter = 0
 
     def forward(self, img):
         outputs = self.input_layer(img)
@@ -47,47 +45,33 @@ class NTSR_CNN(pl.LightningModule):
     
     def training_step(self, batch, batch_idx):
         masked_imgs, imgs = batch
-        # masked_imgs, imgs, true_time_series = batch
         imgs = imgs.float()
         input_img = masked_imgs.float()
         input_img = self.padding(input_img.permute(0, 3, 1, 2))
         
-        # outputs, time_series = self(input_img)
         outputs = self(input_img)
         imgs = imgs.permute(0, 3, 1, 2)
         imgs = self.padding(imgs)
-        # true_time_series = true_time_series.permute(0, 3, 1, 2)
-        # true_time_series = self.padding(true_time_series)
-        
-        # counts_loss, time_pdf_loss = ntsr_loss(outputs, time_series, imgs, true_time_series)
+
         counts_loss, time_pdf_loss = ntsr_loss(outputs, imgs)
         loss = counts_loss + time_pdf_loss
         
         self.log("counts_loss", counts_loss, batch_size=self.hparams.batch_size)
         self.log("time_pdf_loss", time_pdf_loss, batch_size=self.hparams.batch_size)
         self.log("train_loss", loss, batch_size=self.hparams.batch_size)
-        
-        # self.iter += 1
-        # if self.iter == 100:
-        #     import pdb; pdb.set_trace()
-        
+
         return loss
     
     def validation_step(self, batch, batch_idx):
         masked_imgs, imgs = batch
-        # masked_imgs, imgs, true_time_series = batch
         imgs = imgs.float()
         input_img = masked_imgs.float()
         input_img = self.padding(input_img.permute(0, 3, 1, 2))
         
-        # outputs, time_series = self(input_img)
         outputs = self(input_img)
         imgs = imgs.permute(0, 3, 1, 2)
         imgs = self.padding(imgs)
-        # true_time_series = true_time_series.permute(0, 3, 1, 2)
-        # true_time_series = self.padding(true_time_series)
-        
-        # counts_loss, time_pdf_loss = ntsr_loss(outputs, time_series, imgs, true_time_series)
+
         counts_loss, time_pdf_loss = ntsr_loss(outputs, imgs)
         loss = counts_loss + time_pdf_loss
         
@@ -105,10 +89,7 @@ class NTSR_CNN(pl.LightningModule):
         imgs = imgs.permute(0, 3, 1, 2)
         imgs = self.padding(imgs)
         
-        # counts_loss, time_pdf_loss = ntsr_loss(outputs, imgs, true_photons)
-        # loss = counts_loss + time_pdf_loss
-        
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
     
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)

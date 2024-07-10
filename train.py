@@ -78,7 +78,7 @@ if __name__=="__main__":
                             #  precision="bf16-mixed",
                              max_epochs=cfg['training_options']['epochs'],                    
                              log_every_n_steps=1, 
-                            #  overfit_batches=1,
+                            #  overfit_batches=10,
                              gradient_clip_val=0.5,
                              logger=wandb_logger, 
                              callbacks=[lr_monitor, checkpoint_callback],

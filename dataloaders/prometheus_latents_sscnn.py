@@ -9,6 +9,8 @@ from collections import defaultdict
 import MinkowskiEngine as ME
 from networks.common.utils import generate_geo_mask_cuda
 
+from scipy.interpolate import LinearNDInterpolator
+
 class PrometheusLatentsSSCNNDataModule(pl.LightningDataModule):
     def __init__(self, cfg, field='mc_truth'):
         super().__init__()
@@ -24,13 +26,13 @@ class PrometheusLatentsSSCNNDataModule(pl.LightningDataModule):
             self.train_dataset = PrometheusLatentsSSCNNDataset(train_files,
                                                              self.cfg['data_options']['scale_factor'],
                                                              self.cfg['data_options']['offset'],
-                                                             self.cfg['data_options']['first_hit'])
+                                                             self.cfg['data_options']['interpolation'])
             
         valid_files = sorted(glob.glob(self.cfg['data_options']['valid_data_file'] + '*.parquet'))
         self.valid_dataset = PrometheusLatentsSSCNNDataset(valid_files,
                                                             self.cfg['data_options']['scale_factor'],
                                                             self.cfg['data_options']['offset'],
-                                                            self.cfg['data_options']['first_hit'])
+                                                            self.cfg['data_options']['interpolation'])
             
     def train_dataloader(self):
         collate_fn = PrometheusCollator(masking=self.cfg['data_options']['masking'], 
@@ -85,12 +87,12 @@ class PrometheusLatentsSSCNNDataset(torch.utils.data.Dataset):
         files,
         scale_factor,
         offset,
-        first_hit):
+        interpolation):
 
         self.files = files
         self.scale_factor = scale_factor
         self.offset = offset
-        self.first_hit = first_hit
+        self.interpolation = interpolation
         
         num_events = []
         for file in self.files:
@@ -107,6 +109,23 @@ class PrometheusLatentsSSCNNDataset(torch.utils.data.Dataset):
         
         # self.cache = OrderedDict()
         # self.cache_size = 20
+        
+        geo_x = np.linspace(-420, 420, 15)
+        geo_y = np.linspace(-420, 420, 15)
+        geo_z = np.linspace(-(60*15)/2, (60*15)/2, 61)
+        # Create the meshgrid for all combinations
+        X, Y, Z = np.meshgrid(geo_x, geo_y, geo_z, indexing='ij')
+        # Flatten the meshgrid arrays and stack them as columns
+        coordinates = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+        sparse_geo_x = np.linspace(-420, 420, 8)
+        sparse_geo_y = np.linspace(-420, 420, 8)
+        # Create the meshgrid for all combinations
+        X, Y, Z = np.meshgrid(sparse_geo_x, sparse_geo_y, geo_z, indexing='ij')
+        # Flatten the meshgrid arrays and stack them as columns
+        sparse_coordinates = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+        real_sensors = sparse_coordinates
+        mask = np.array([row in sparse_coordinates.tolist() for row in coordinates.tolist()])
+        self.virtual_sensors = coordinates[~mask]
 
     def __len__(self):
         return self.dataset_size
@@ -138,15 +157,34 @@ class PrometheusLatentsSSCNNDataset(torch.utils.data.Dataset):
                  event.mc_truth.initial_state_y, 
                  event.mc_truth.initial_state_z]
         
-        # latents
-        unique_pos = event.latents.string_sensor_pos.to_numpy().astype(np.int32)
-        unique_sensor_pos = event.latents.pos.to_numpy()
-        counts = event.latents.num_hits.to_numpy()
-        counts = np.log(counts + 1)
-        latents = event.latents.latents.to_numpy()
-        
-        feats = np.hstack([counts.reshape(-1, 1), latents])
-        
+        if self.interpolation:
+            unique_sensor_pos = event.unique_oms.pos.to_numpy()
+            counts = event.unique_oms.num_hits.to_numpy()
+            # counts = np.log(counts + 1)
+            first_time_hits = event.unique_oms.first_time_hit.to_numpy()
+            # latents = event.unique_oms.latents.to_numpy()
+            # first_time_hits = np.log(first_time_hits + 1)
+            feats = np.hstack([counts.reshape(-1, 1), first_time_hits.reshape(-1, 1)])
+            # feats = np.hstack([counts.reshape(-1, 1), latents])
+            
+            # interpolated_pos = event.interpolated.pos.to_numpy()
+            # interpolated_counts = event.interpolated.num_hits.to_numpy()
+            # # interpolated_counts = np.log(interpolated_counts + 1)
+            # interpolated_first_time_hits = event.interpolated.first_time_hit.to_numpy()
+            # # interpolated_latents = event.interpolated.latents.to_numpy()
+            # # interpolated_first_time_hits = np.log(interpolated_first_time_hits + 1)
+            # interpolated_feats = np.hstack([interpolated_counts.reshape(-1, 1), interpolated_first_time_hits.reshape(-1, 1)])
+            # # interpolated_feats = np.hstack([interpolated_counts.reshape(-1, 1), interpolated_latents])
+            
+            # if interpolated_pos.shape[0] != 0:
+            #     unique_sensor_pos = np.vstack([unique_sensor_pos, interpolated_pos])
+            #     feats = np.vstack([feats, interpolated_feats])
+        else:
+            unique_sensor_pos = event.latents.pos.to_numpy()
+            counts = event.latents.num_hits.to_numpy()
+            counts = np.log(counts + 1)
+            latents = event.latents.latents.to_numpy()
+            feats = np.hstack([counts.reshape(-1, 1), latents])
         return torch.from_numpy(unique_sensor_pos), torch.from_numpy(feats), torch.from_numpy(np.array([label]))
 
 class ParquetFileSampler(torch.utils.data.Sampler):
