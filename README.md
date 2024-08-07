@@ -3,6 +3,7 @@ Machine learning pipeline for reconstruction in neutrino telescopes. Contains co
 
 - Python 3.11.2
 - PyTorch 2.2
+- PyTorch Lightning 2.1
 - CUDA 12.1
 - [MinkowskiEngine](https://github.com/NVIDIA/MinkowskiEngine) (for SSCNN) 0.5.4
 - [Segmentation Models PyTorch](https://github.com/qubvel-org/segmentation_models.pytorch)
